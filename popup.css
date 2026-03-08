@@ -172,6 +172,24 @@ header h1 {
     background: rgba(233, 69, 96, 0.1);
 }
 
+.danger-btn {
+    width: 100%;
+    padding: 10px 16px;
+    background: rgba(255, 77, 109, 0.14);
+    color: #ff7a8f;
+    border: 1px solid rgba(255, 122, 143, 0.65);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-top: 12px;
+}
+
+.danger-btn:hover {
+    background: rgba(255, 77, 109, 0.22);
+}
+
 /* Progress section */
 .status-text {
     font-size: 14px;

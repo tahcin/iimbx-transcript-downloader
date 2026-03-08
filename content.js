@@ -172,6 +172,11 @@ function isSkippableNonLectureSequential() {
 let currentCorrelationId = null;
 let transcriptResolve = null;
 let pendingTranscripts = [];
+let stopRequested = false;
+
+function shouldStop() {
+    return stopRequested;
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'GET_COURSE_LIST') {
@@ -180,12 +185,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === 'START_DOWNLOAD') {
+        stopRequested = false;
         handleStartDownload(message.courses);
         sendResponse({ status: 'started' });
+        return true;
     }
 
     if (message.type === 'TRANSCRIPTS_FOUND_RELAY') {
         handleTranscriptsFoundRelay(message);
+    }
+
+    if (message.type === 'STOP_DOWNLOAD') {
+        stopRequested = true;
+        pendingTranscripts = [];
+        if (transcriptResolve) {
+            transcriptResolve([]);
+            transcriptResolve = null;
+        }
+        clearProcessingState().finally(() => {
+            sendResponse({ status: 'stopping' });
+        });
+        return true;
     }
 });
 
@@ -266,6 +286,7 @@ function buildCourseHomeUrl(courseId) {
 }
 
 async function resumeProcessing(savedState) {
+    if (shouldStop()) return;
     const selectedCourses = Array.isArray(savedState.selectedCourses) ? savedState.selectedCourses : [];
     const currentCourseIndex = Number.isInteger(savedState.currentCourseIndex) ? savedState.currentCourseIndex : 0;
     const course = selectedCourses[currentCourseIndex];
@@ -297,6 +318,7 @@ async function resumeProcessing(savedState) {
 }
 
 async function crawlCourseHome(course, allCourses, courseIdx) {
+    if (shouldStop()) return;
     console.log(`[IIMBx] Collecting sequentials from course home: ${course.name}`);
     await saveProcessingState({
         state: 'CRAWLING_COURSE_HOME',
@@ -358,6 +380,7 @@ async function clickVisiblePlusControls() {
 }
 
 async function collectAllSequentialsFromHome(courseId, maxPasses = 6) {
+    if (shouldStop()) return [];
     await expandAllHomeSections();
     await delay(1000);
 
@@ -365,6 +388,7 @@ async function collectAllSequentialsFromHome(courseId, maxPasses = 6) {
     let previousCount = -1;
 
     for (let pass = 0; pass < maxPasses; pass++) {
+        if (shouldStop()) return sequentials;
         sequentials = uniqueBy(
             [...sequentials, ...collectSequentialsFromHome(courseId)],
             entry => entry.url
@@ -563,6 +587,7 @@ function collectChildSequentialsFromCurrentPage(parentSequential) {
 }
 
 async function processSequentialPage(course, allCourses, courseIdx, savedState) {
+    if (shouldStop()) return;
     const sequentials = Array.isArray(savedState.sequentials) ? savedState.sequentials : [];
     if (sequentials.length === 0) {
         console.warn('[IIMBx] Missing sequential list in state, returning to course home');
@@ -628,6 +653,7 @@ async function processSequentialPage(course, allCourses, courseIdx, savedState) 
     console.log(`[IIMBx] Found ${unitEntries.length} units in sidebar`);
 
     for (let unitIdx = 0; unitIdx < unitEntries.length; unitIdx++) {
+        if (shouldStop()) return;
         const unit = unitEntries[unitIdx];
         const correlationId = `${course.courseId}::${currentSequentialIndex}::${unitIdx}::${Date.now()}`;
         const expectedBlockId = extractVerticalBlockId(unit.url);
@@ -678,6 +704,7 @@ async function processSequentialPage(course, allCourses, courseIdx, savedState) 
         }
 
         let transcripts = await waitForTranscripts(5000);
+        if (shouldStop()) return;
         if (transcripts.length === 0) {
             console.log(`[IIMBx] No transcripts received on first pass for ${unit.title}, retrying iframe reload`);
             try {
@@ -689,6 +716,8 @@ async function processSequentialPage(course, allCourses, courseIdx, savedState) 
             }
             transcripts = await waitForTranscripts(5000);
         }
+
+        if (shouldStop()) return;
 
         if (transcripts.length > 0) {
             console.log(`[IIMBx] Found ${transcripts.length} transcript(s) for ${unit.title}`);
@@ -816,6 +845,7 @@ function waitForSequentialActivation(expectedBlockId, timeout = 7000) {
 }
 
 async function navigateToNextSequentialOrCourse(allCourses, courseIdx, sequentials, currentSequentialIndex) {
+    if (shouldStop()) return;
     const nextSequentialIndex = currentSequentialIndex + 1;
     if (nextSequentialIndex < sequentials.length) {
         const nextSequential = sequentials[nextSequentialIndex];
@@ -854,6 +884,7 @@ async function navigateToNextSequentialOrCourse(allCourses, courseIdx, sequentia
 }
 
 async function moveToNextCourse(allCourses, currentIdx) {
+    if (shouldStop()) return;
     const nextIdx = currentIdx + 1;
     if (nextIdx < allCourses.length) {
         const nextCourse = allCourses[nextIdx];
@@ -881,6 +912,7 @@ async function clearProcessingState() {
 }
 
 async function finishCrawling() {
+    if (shouldStop()) return;
     console.log('[IIMBx] All done - CRAWL_COMPLETE');
     try {
         await chrome.runtime.sendMessage({ type: 'CRAWL_COMPLETE' });
@@ -892,6 +924,7 @@ async function finishCrawling() {
 
 async function init() {
     await delay(1000);
+    if (shouldStop()) return;
     const { processingState } = await chrome.storage.local.get('processingState');
     if (processingState) {
         await resumeProcessing(processingState);

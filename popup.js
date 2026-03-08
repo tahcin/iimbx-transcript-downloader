@@ -1,41 +1,32 @@
-// ============================================
-// IIMBx Transcript Downloader — popup.js
-// Handles: course list display, selection,
-// start download, progress display
-// ============================================
-
 'use strict';
 
-// DOM References
-const notOnDashboard  = document.getElementById('not-on-dashboard');
-const loadingState    = document.getElementById('loading-state');
+const notOnDashboard = document.getElementById('not-on-dashboard');
+const loadingState = document.getElementById('loading-state');
 const courseSelection = document.getElementById('course-selection');
 const progressSection = document.getElementById('progress-section');
 const completeSection = document.getElementById('complete-section');
 
-const goToDashboard  = document.getElementById('go-to-dashboard');
-const selectAllCb    = document.getElementById('select-all');
-const courseListDiv   = document.getElementById('course-list');
-const startBtn       = document.getElementById('start-download');
-const restartBtn     = document.getElementById('restart-btn');
+const goToDashboard = document.getElementById('go-to-dashboard');
+const selectAllCb = document.getElementById('select-all');
+const courseListDiv = document.getElementById('course-list');
+const startBtn = document.getElementById('start-download');
+const restartBtn = document.getElementById('restart-btn');
+const stopBtn = document.getElementById('stop-download');
 
-const statusText     = document.getElementById('status-text');
-const progressFill   = document.getElementById('progress-fill');
-const currentCourse  = document.getElementById('current-course');
+const statusText = document.getElementById('status-text');
+const progressFill = document.getElementById('progress-fill');
+const currentCourse = document.getElementById('current-course');
 const currentSection = document.getElementById('current-section');
-const currentUnit    = document.getElementById('current-unit');
-const downloadCount  = document.getElementById('download-count');
-const logArea        = document.getElementById('log');
+const currentUnit = document.getElementById('current-unit');
+const downloadCount = document.getElementById('download-count');
+const logArea = document.getElementById('log');
 const completeSummary = document.getElementById('complete-summary');
 
 const DASHBOARD_URL = 'https://apps.iimbx.edu.in/learner-dashboard/';
 
-// ---- State ----
 let courses = [];
 let tabId = null;
 let progressPollTimer = null;
-
-// ---- Helpers ----
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -43,16 +34,10 @@ function delay(ms) {
 
 function showOnly(section) {
   [notOnDashboard, loadingState, courseSelection, progressSection, completeSection]
-    .forEach(el => el.classList.add('hidden'));
-  if (section) section.classList.remove('hidden');
-}
-
-function addLog(text, type = 'info') {
-  const entry = document.createElement('div');
-  entry.className = `log-entry ${type}`;
-  entry.textContent = text;
-  logArea.appendChild(entry);
-  logArea.scrollTop = logArea.scrollHeight;
+    .forEach(element => element.classList.add('hidden'));
+  if (section) {
+    section.classList.remove('hidden');
+  }
 }
 
 function stopProgressPolling() {
@@ -68,7 +53,9 @@ function startProgressPolling() {
   progressPollTimer = setInterval(async () => {
     try {
       const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
-      if (progress) updateProgress(progress);
+      if (progress) {
+        updateProgress(progress);
+      }
     } catch (e) {
       // Background may be temporarily unavailable; next tick will retry.
     }
@@ -102,14 +89,11 @@ function updateStartButton() {
   startBtn.disabled = checked.length === 0;
 }
 
-// ---- Course List Rendering ----
-
 function renderCourseList(courseData) {
   courses = courseData;
   courseListDiv.innerHTML = '';
 
-  // Restore previously selected courses
-  chrome.storage.local.get('selectedCourseIds', (data) => {
+  chrome.storage.local.get('selectedCourseIds', data => {
     const savedIds = new Set(data.selectedCourseIds || []);
 
     courses.forEach(course => {
@@ -157,17 +141,24 @@ function saveSelectedCourses() {
   chrome.storage.local.set({ selectedCourseIds: selected });
 }
 
-// ---- Progress UI Update ----
-
 function updateProgress(data) {
-  // data is a ProgressSnapshot
   if (data.status === 'complete') {
     stopProgressPolling();
     showOnly(completeSection);
     completeSummary.innerHTML =
       `<strong>${data.downloaded}</strong> transcripts downloaded` +
       (data.errors > 0 ? `<br>${data.errors} errors` : '') +
-      `<br>Download complete! ✨`;
+      '<br>Download complete!';
+    return;
+  }
+
+  if (data.status === 'stopped') {
+    stopProgressPolling();
+    showOnly(completeSection);
+    completeSummary.innerHTML =
+      `<strong>${data.downloaded || 0}</strong> transcripts downloaded` +
+      (data.errors > 0 ? `<br>${data.errors} errors` : '') +
+      '<br>Download stopped.';
     return;
   }
 
@@ -175,27 +166,25 @@ function updateProgress(data) {
   showOnly(progressSection);
 
   const statusMap = {
-    'downloading':     '⏳ Downloading...',
-    'crawl_complete':  '⏳ Finishing downloads...',
-    'error':           '⚠️ Error occurred',
-    'idle':            '⏸ Idle'
+    downloading: 'Downloading...',
+    crawl_complete: 'Finishing downloads...',
+    error: 'Error occurred',
+    stopped: 'Stopped',
+    idle: 'Idle'
   };
-  statusText.textContent = statusMap[data.status] || `⏳ ${data.status}...`;
 
+  statusText.textContent = statusMap[data.status] || `${data.status || 'Downloading'}...`;
   progressFill.style.width = `${data.percent || 0}%`;
 
-  if (data.courseName)  currentCourse.innerHTML  = `<strong>Course:</strong> ${data.courseName}`;
+  if (data.courseName) currentCourse.innerHTML = `<strong>Course:</strong> ${data.courseName}`;
   if (data.sectionName) currentSection.innerHTML = `<strong>Section:</strong> ${data.sectionName}`;
-  if (data.unitTitle)   currentUnit.innerHTML    = `<strong>Unit:</strong> ${data.unitTitle}`;
+  if (data.unitTitle) currentUnit.innerHTML = `<strong>Unit:</strong> ${data.unitTitle}`;
 
   downloadCount.innerHTML = `<strong>Downloaded:</strong> ${data.downloaded || 0} / ${data.total || 0} PDFs` +
     (data.activeDownloads > 0 ? ` (${data.activeDownloads} in flight)` : '') +
     (data.errors > 0 ? ` | ${data.errors} errors` : '');
 }
 
-// ---- Event Listeners ----
-
-// "Go to Dashboard" button
 goToDashboard.addEventListener('click', () => {
   if (tabId) {
     chrome.tabs.update(tabId, { url: DASHBOARD_URL });
@@ -203,15 +192,15 @@ goToDashboard.addEventListener('click', () => {
   }
 });
 
-// "Select All" checkbox
 selectAllCb.addEventListener('change', () => {
   const boxes = courseListDiv.querySelectorAll('input[type="checkbox"]');
-  boxes.forEach(cb => cb.checked = selectAllCb.checked);
+  boxes.forEach(cb => {
+    cb.checked = selectAllCb.checked;
+  });
   updateStartButton();
   saveSelectedCourses();
 });
 
-// "Download Transcripts" button
 startBtn.addEventListener('click', async () => {
   const selected = Array.from(courseListDiv.querySelectorAll('input[type="checkbox"]:checked'))
     .map(cb => ({
@@ -222,7 +211,7 @@ startBtn.addEventListener('click', async () => {
   if (selected.length === 0) return;
 
   showOnly(progressSection);
-  statusText.textContent = '⏳ Starting...';
+  statusText.textContent = 'Starting...';
   logArea.innerHTML = '';
 
   try {
@@ -239,9 +228,43 @@ startBtn.addEventListener('click', async () => {
   }
 });
 
-// "Start New Download" button (from complete state)
 restartBtn.addEventListener('click', () => {
   handleStartNewDownload();
+});
+
+stopBtn.addEventListener('click', async () => {
+  stopBtn.disabled = true;
+
+  try {
+    await chrome.runtime.sendMessage({ type: 'STOP_DOWNLOAD' });
+  } catch (e) {
+    // Ignore worker stop failures and still try to stop the page loop.
+  }
+
+  try {
+    if (tabId) {
+      await chrome.tabs.sendMessage(tabId, { type: 'STOP_DOWNLOAD' });
+    }
+  } catch (e) {
+    // Ignore if the active tab is no longer a content-script page.
+  }
+
+  await chrome.storage.local.remove('processingState');
+
+  try {
+    const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
+    updateProgress({ ...progress, status: 'stopped' });
+  } catch (e) {
+    updateProgress({ status: 'stopped', downloaded: 0, total: 0, errors: 0, activeDownloads: 0 });
+  } finally {
+    stopBtn.disabled = false;
+  }
+});
+
+chrome.runtime.onMessage.addListener(message => {
+  if (message.type === 'PROGRESS_UPDATE') {
+    updateProgress(message);
+  }
 });
 
 async function handleStartNewDownload() {
@@ -282,17 +305,7 @@ async function handleStartNewDownload() {
   }
 }
 
-// Listen for PROGRESS_UPDATE from background
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'PROGRESS_UPDATE') {
-    updateProgress(message);
-  }
-});
-
-// ---- Initialization ----
-
 async function init() {
-  // Get current tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) {
     showOnly(notOnDashboard);
@@ -300,10 +313,13 @@ async function init() {
   }
   tabId = tab.id;
 
-  // Check if we're already mid-process — ask background for status
   try {
     const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
     if (progress && progress.isRunning) {
+      updateProgress(progress);
+      return;
+    }
+    if (progress && progress.status === 'stopped') {
       updateProgress(progress);
       return;
     }
@@ -312,16 +328,14 @@ async function init() {
       return;
     }
   } catch (e) {
-    // Background not ready yet, continue with normal init
+    // Background not ready yet, continue with normal init.
   }
 
-  // Check if on dashboard
   if (!tab.url || !tab.url.includes('apps.iimbx.edu.in/learner-dashboard')) {
     showOnly(notOnDashboard);
     return;
   }
 
-  // On dashboard — request course list from content script
   showOnly(loadingState);
 
   try {
@@ -342,5 +356,4 @@ async function init() {
   }
 }
 
-// Run on popup open
 init();

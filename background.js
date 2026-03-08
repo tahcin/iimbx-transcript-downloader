@@ -23,6 +23,7 @@ function createDefaultState() {
         },
         activeDownloads: {},
         pendingRetryCount: 0,
+        stopRequested: false,
         isCrawling: false,
         isRunning: false
     };
@@ -94,6 +95,11 @@ function sanitizeFilename(name) {
 // ---- Progress Broadcasting ----
 
 function buildProgressSnapshot(status) {
+    const effectiveStatus = status || (
+        state.stopRequested && !state.isRunning && !state.isCrawling
+            ? 'stopped'
+            : null
+    );
     const isComplete = !state.isRunning
         && !state.isCrawling
         && Object.keys(state.activeDownloads).length === 0
@@ -103,7 +109,7 @@ function buildProgressSnapshot(status) {
 
     return {
         type: 'PROGRESS_UPDATE',
-        status: status || (isComplete ? 'complete' : (state.isRunning ? 'downloading' : 'idle')),
+        status: effectiveStatus || (isComplete ? 'complete' : (state.isRunning ? 'downloading' : 'idle')),
         isRunning: state.isRunning,
         courseName: state.cursor.courseName || '',
         sectionName: state.cursor.sectionName || '',
@@ -136,6 +142,7 @@ function checkAllComplete() {
 // ---- Download Handler ----
 
 async function handleDownloadPDF({ url, courseName, sectionName, unitTitle, filename }) {
+    if (state.stopRequested) return;
     // Dedup: skip if already queued or completed
     if (state.queuedUrls.includes(url) || state.completedUrls.includes(url)) return;
     state.queuedUrls.push(url);
@@ -182,6 +189,15 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     await ensureStateLoaded();
     const entry = state.activeDownloads[delta.id];
     if (!entry) return;
+
+    if (state.stopRequested) {
+        delete state.activeDownloads[delta.id];
+        await saveState();
+        if (Object.keys(state.activeDownloads).length === 0) {
+            broadcastProgress('stopped');
+        }
+        return;
+    }
 
     if (delta.state) {
         if (delta.state.current === 'complete') {
@@ -336,6 +352,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state = createDefaultState();
             await saveState();
             sendResponse({ status: 'reset' });
+        }
+
+        if (message.type === 'STOP_DOWNLOAD') {
+            state.stopRequested = true;
+            state.isCrawling = false;
+            state.isRunning = false;
+            state.pendingRetryCount = 0;
+            state.cursor = {
+                correlationId: '',
+                expectedBlockId: '',
+                courseName: state.cursor.courseName || '',
+                sectionName: '',
+                unitTitle: ''
+            };
+
+            const activeDownloadIds = Object.keys(state.activeDownloads).map(id => Number(id));
+            state.activeDownloads = {};
+            await saveState();
+
+            for (const downloadId of activeDownloadIds) {
+                chrome.downloads.cancel(downloadId, () => {
+                    chrome.runtime.lastError;
+                });
+            }
+
+            broadcastProgress('stopped');
+            sendResponse({ status: 'stopped' });
         }
 
         if (message.type === 'CRAWL_COMPLETE') {
