@@ -101,9 +101,18 @@ function uniqueBy(items, keyFn) {
 }
 
 function parseOutlineNumbers(text) {
-    const match = normalizeWhitespace(text).match(/^(\d+(?:\.\d+)*)/);
-    if (!match) return [];
-    return match[1].split('.').map(value => Number.parseInt(value, 10));
+    const normalized = normalizeWhitespace(text);
+    const match = normalized.match(/^(\d+(?:\.\d+)*)/);
+    if (match) {
+        return match[1].split('.').map(value => Number.parseInt(value, 10));
+    }
+
+    const moduleMatch = normalized.match(/^Module\s+(\d+)/i);
+    if (moduleMatch) {
+        return [Number.parseInt(moduleMatch[1], 10)];
+    }
+
+    return [];
 }
 
 function compareOutlineEntries(left, right) {
@@ -127,8 +136,26 @@ function extractSectionNumber(sectionName) {
     return match ? Number.parseInt(match[1], 10) : null;
 }
 
+function extractModuleNumber(sectionName) {
+    const match = normalizeWhitespace(sectionName).match(/^Module\s+(\d+):/i);
+    return match ? Number.parseInt(match[1], 10) : null;
+}
+
 function isSequentialTitle(text) {
     return /^\d+\.\d+\s+\S+/.test(normalizeWhitespace(text));
+}
+
+function isModuleTitle(text) {
+    return /^Module\s+\d+:/i.test(normalizeWhitespace(text));
+}
+
+function isOutlineEntryTitle(text) {
+    return isSequentialTitle(text) || isModuleTitle(text);
+}
+
+function isHomeContainerTitle(text) {
+    const normalized = normalizeWhitespace(text);
+    return /^Section\s+\d+:/i.test(normalized) || /^Module\s+\d+:/i.test(normalized);
 }
 
 function isSkippableNonLectureSequential() {
@@ -376,13 +403,18 @@ async function collectAllSequentialsFromHome(courseId, maxPasses = 6) {
 }
 
 function getHomeSectionHeadings() {
-    return Array.from(document.querySelectorAll('div.font-weight-bold.text-dark-500'))
+    return Array.from(document.querySelectorAll('div, span'))
         .map(element => ({
             element,
             title: cleanSectionLabel(element.textContent)
         }))
-        .filter(entry => /^Section\s+\d+:/i.test(entry.title))
-        .sort((left, right) => (extractSectionNumber(left.title) ?? 0) - (extractSectionNumber(right.title) ?? 0));
+        .filter(entry => isHomeContainerTitle(entry.title))
+        .filter(entry => isVisible(entry.element))
+        .sort((left, right) => {
+            const leftNumber = extractSectionNumber(left.title) ?? extractModuleNumber(left.title) ?? 0;
+            const rightNumber = extractSectionNumber(right.title) ?? extractModuleNumber(right.title) ?? 0;
+            return leftNumber - rightNumber;
+        });
 }
 
 async function expandHomeSection(sectionEntry) {
@@ -410,7 +442,7 @@ function findSectionRow(element) {
     let current = element;
     while (current && current !== document.body) {
         const text = normalizeWhitespace(current.textContent);
-        if (/^Section\s+\d+:/i.test(text) && /[+-]$/.test(text)) {
+        if (isHomeContainerTitle(text)) {
             return current;
         }
         current = current.parentElement;
@@ -440,7 +472,7 @@ async function expandCollapsedHomeSections() {
 
     for (const row of rows) {
         const text = normalizeWhitespace(row.textContent);
-        if (!/^Section\s+\d+:/i.test(text)) continue;
+        if (!isHomeContainerTitle(text)) continue;
 
         const clickable = Array.from(row.querySelectorAll('button, a, [role="button"], div, span'))
             .find(element => isVisible(element) && /^[+]$/.test(normalizeWhitespace(element.textContent)));
@@ -453,7 +485,7 @@ async function expandCollapsedHomeSections() {
         }
 
         const container = findSectionContainer(row);
-        if (container && /[+]$/.test(normalizeWhitespace(container.textContent))) {
+        if (container) {
             container.click();
             expandedAny = true;
             await delay(500);
@@ -467,7 +499,7 @@ function findSectionContainer(element) {
     let current = element;
     while (current && current !== document.body) {
         const text = normalizeWhitespace(current.textContent);
-        if (/^Section\s+\d+:/i.test(text) && /[+-]/.test(text)) {
+        if (isHomeContainerTitle(text)) {
             return current;
         }
         current = current.parentElement;
@@ -484,7 +516,7 @@ function collectSequentialsFromHome(courseId) {
     for (const item of items) {
         const text = normalizeWhitespace(item.textContent);
 
-        if (item.matches('div.font-weight-bold.text-dark-500') && /^Section\s+\d+:/i.test(text)) {
+        if (!item.matches('a') && isHomeContainerTitle(text)) {
             currentSectionName = cleanSectionLabel(text);
             continue;
         }
@@ -492,7 +524,7 @@ function collectSequentialsFromHome(courseId) {
         if (!item.matches('a')) continue;
 
         const title = cleanUnitLabel(text);
-        if (!isSequentialTitle(title)) continue;
+        if (!isOutlineEntryTitle(title)) continue;
 
         const url = normalizeSequentialUrl(item.href, courseId);
         if (!url || !title) continue;
@@ -505,6 +537,29 @@ function collectSequentialsFromHome(courseId) {
     }
 
     return uniqueBy(sequentials, entry => entry.url).sort(compareOutlineEntries);
+}
+
+function collectChildSequentialsFromCurrentPage(parentSequential) {
+    const currentSequentialBlockId = extractSequentialBlockId(window.location.href);
+    const links = Array.from(document.querySelectorAll('.outline-sidebar a[href*="type@sequential"]'))
+        .filter(link => isVisible(link));
+
+    const children = links.map(link => {
+        const title = cleanUnitLabel(link.textContent);
+        const url = normalizeSequentialUrl(link.href);
+
+        if (!title || !url) return null;
+        if (!isSequentialTitle(title)) return null;
+        if (extractSequentialBlockId(url) === currentSequentialBlockId) return null;
+
+        return {
+            url,
+            title,
+            sectionName: parentSequential.title
+        };
+    }).filter(Boolean);
+
+    return uniqueBy(children, entry => entry.url).sort(compareOutlineEntries);
 }
 
 async function processSequentialPage(course, allCourses, courseIdx, savedState) {
@@ -534,6 +589,28 @@ async function processSequentialPage(course, allCourses, courseIdx, savedState) 
         sequentials,
         currentSequentialIndex
     });
+
+    const childSequentials = collectChildSequentialsFromCurrentPage(currentSequential);
+    if (childSequentials.length > 0 && isModuleTitle(currentSequential.title)) {
+        console.log(`[IIMBx] Expanding module ${currentSequential.title} into ${childSequentials.length} child sequentials`);
+
+        const expandedSequentials = [
+            ...sequentials.slice(0, currentSequentialIndex),
+            ...childSequentials,
+            ...sequentials.slice(currentSequentialIndex + 1)
+        ];
+
+        await saveProcessingState({
+            state: 'NAVIGATING_TO_SEQUENTIAL',
+            selectedCourses: allCourses,
+            currentCourseIndex: courseIdx,
+            sequentials: expandedSequentials,
+            currentSequentialIndex
+        });
+
+        window.location.assign(childSequentials[0].url);
+        return;
+    }
 
     let unitEntries = [];
     if (isSkippableNonLectureSequential()) {
