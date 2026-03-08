@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📄 IIMBx Transcript Downloader</h1>
+        </header>
+
+        <!-- State 1: Not on dashboard -->
+        <div id="not-on-dashboard" class="hidden">
+            <p class="info-text">Please navigate to your IIMBx dashboard to see your courses.</p>
+            <button id="go-to-dashboard" class="secondary-btn">Go to Dashboard</button>
+        </div>
+
+        <!-- State 2: Loading -->
+        <div id="loading-state" class="hidden">
+            <div class="spinner"></div>
+            <p class="info-text">Loading courses...</p>
+        </div>
+
+        <!-- State 3: Course list + selection -->
+        <div id="course-selection" class="hidden">
+            <div class="select-all-row">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="select-all">
+                    <span>Select All</span>
+                </label>
+            </div>
+            <div id="course-list" class="course-list">
+                <!-- Dynamically populated -->
+            </div>
+            <button id="start-download" class="primary-btn" disabled>🔽 Download Transcripts</button>
+        </div>
+
+        <!-- State 4: Progress -->
+        <div id="progress-section" class="hidden">
+            <div id="status-text" class="status-text">Initializing...</div>
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div class="progress-details">
+                <div id="current-course" class="detail-line"></div>
+                <div id="current-section" class="detail-line"></div>
+                <div id="current-unit" class="detail-line"></div>
+                <div id="download-count" class="detail-line"></div>
+            </div>
+            <div id="log" class="log-area"></div>
+        </div>
+
+        <!-- State 5: Complete -->
+        <div id="complete-section" class="hidden">
+            <div class="complete-icon">✅</div>
+            <div id="complete-summary" class="complete-summary"></div>
+            <button id="restart-btn" class="secondary-btn">Start New Download</button>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>
