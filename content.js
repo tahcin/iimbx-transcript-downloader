@@ -137,7 +137,7 @@ function extractSectionNumber(sectionName) {
 }
 
 function extractModuleNumber(sectionName) {
-    const match = normalizeWhitespace(sectionName).match(/^Module\s+(\d+):/i);
+    const match = normalizeWhitespace(sectionName).match(/^Module\s+(\d+)\s*(?:\||:)/i);
     return match ? Number.parseInt(match[1], 10) : null;
 }
 
@@ -146,7 +146,7 @@ function isSequentialTitle(text) {
 }
 
 function isModuleTitle(text) {
-    return /^Module\s+\d+:/i.test(normalizeWhitespace(text));
+    return /^Module\s+\d+\s*(?:\||:)/i.test(normalizeWhitespace(text));
 }
 
 function isOutlineEntryTitle(text) {
@@ -155,7 +155,7 @@ function isOutlineEntryTitle(text) {
 
 function isHomeContainerTitle(text) {
     const normalized = normalizeWhitespace(text);
-    return /^Section\s+\d+:/i.test(normalized) || /^Module\s+\d+:/i.test(normalized);
+    return /^Section\s+\d+:/i.test(normalized) || /^Module\s+\d+\s*(?:\||:)/i.test(normalized);
 }
 
 function isSkippableNonLectureSequential() {
@@ -397,7 +397,9 @@ async function collectAllSequentialsFromHome(courseId, maxPasses = 6) {
         const missingSections = getHomeSectionHeadings()
             .filter(section => {
                 const sectionNumber = extractSectionNumber(section.title);
-                return sectionNumber != null && !sequentials.some(entry => parseOutlineNumbers(entry.title)[0] === sectionNumber);
+                const moduleNumber = extractModuleNumber(section.title);
+                const containerNumber = sectionNumber ?? moduleNumber;
+                return containerNumber != null && !sequentials.some(entry => parseOutlineNumbers(entry.title)[0] === containerNumber);
             });
 
         if (missingSections.length > 0) {
@@ -478,7 +480,7 @@ async function waitForCourseHomeReady(timeout = 15000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
         const hasSectionHeading = Array.from(document.querySelectorAll('div, span'))
-            .some(element => /^Section\s+\d+:/i.test(normalizeWhitespace(element.textContent)));
+            .some(element => isHomeContainerTitle(normalizeWhitespace(element.textContent)));
         const hasSequentialLink = document.querySelector('a[href*="type@sequential"], a[href*="/jump_to/"]');
 
         if (hasSectionHeading || hasSequentialLink) {
