@@ -16,6 +16,7 @@ function createDefaultState() {
         stats: { total: 0, completed: 0, errors: 0 },
         cursor: {
             correlationId: '',
+            scanId: '',
             expectedBlockId: '',
             courseName: '',
             sectionName: '',
@@ -268,6 +269,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             console.log(`[BG] TRANSCRIPTS_FOUND received:`, {
                 iframeSrc: (message.iframeSrc || '').substring(0, 100),
                 count: message.transcripts?.length,
+                scanId: message.scanId,
                 expectedBlockId: state.cursor.expectedBlockId,
                 correlationId: state.cursor.correlationId,
                 senderTab: sender.tab?.id
@@ -276,11 +278,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const iframeSrc = message.iframeSrc || '';
             const expectedBlockId = state.cursor.expectedBlockId || '';
             const correlationId = state.cursor.correlationId || '';
+            const activeScanId = state.cursor.scanId || '';
+            const messageScanId = message.scanId || '';
 
             // Only drop if we have a block ID AND it doesn't match
             if (expectedBlockId && !iframeSrc.includes(expectedBlockId)) {
                 console.warn(`[BG] Dropping stale TRANSCRIPTS_FOUND: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 80)}`);
                 sendResponse({ status: 'ignored', reason: 'stale_iframe' });
+                return;
+            }
+
+            if (activeScanId && (!messageScanId || messageScanId !== activeScanId)) {
+                console.warn(`[BG] Dropping stale TRANSCRIPTS_FOUND: expected scanId ${activeScanId}, got ${messageScanId || 'missing'}`);
+                sendResponse({ status: 'ignored', reason: 'stale_scan' });
                 return;
             }
 
@@ -310,6 +320,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 await chrome.tabs.sendMessage(sender.tab.id, {
                     type: 'TRANSCRIPTS_FOUND_RELAY',
                     correlationId,
+                    scanId: activeScanId,
                     iframeSrc: message.iframeSrc,
                     transcripts: message.transcripts
                 }).catch(e => {
@@ -323,6 +334,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
         }
 
+        if (message.type === 'TRANSCRIPT_SCAN_COMPLETE') {
+            const iframeSrc = message.iframeSrc || '';
+            const expectedBlockId = state.cursor.expectedBlockId || '';
+            const correlationId = state.cursor.correlationId || '';
+            const activeScanId = state.cursor.scanId || '';
+            const messageScanId = message.scanId || '';
+
+            if (expectedBlockId && !iframeSrc.includes(expectedBlockId)) {
+                console.warn(`[BG] Dropping stale TRANSCRIPT_SCAN_COMPLETE: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 80)}`);
+                sendResponse({ status: 'ignored', reason: 'stale_iframe' });
+                return;
+            }
+
+            if (activeScanId && (!messageScanId || messageScanId !== activeScanId)) {
+                console.warn(`[BG] Dropping stale TRANSCRIPT_SCAN_COMPLETE: expected scanId ${activeScanId}, got ${messageScanId || 'missing'}`);
+                sendResponse({ status: 'ignored', reason: 'stale_scan' });
+                return;
+            }
+
+            if (!sender.tab || !correlationId) {
+                sendResponse({ status: 'ignored', reason: 'missing_context' });
+                return;
+            }
+
+            await chrome.tabs.sendMessage(sender.tab.id, {
+                type: 'TRANSCRIPT_SCAN_COMPLETE_RELAY',
+                correlationId,
+                scanId: activeScanId,
+                iframeSrc,
+                transcripts: Array.isArray(message.transcripts) ? message.transcripts : []
+            }).catch(e => {
+                console.error('[BG] Failed to relay TRANSCRIPT_SCAN_COMPLETE:', e);
+                return null;
+            });
+
+            sendResponse({ status: 'relayed' });
+        }
+
         if (message.type === 'DOWNLOAD_PDF') {
             await handleDownloadPDF(message);
             sendResponse({ status: 'queued' });
@@ -333,6 +382,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.isRunning = true;
             state.cursor = {
                 correlationId: message.correlationId,
+                scanId: message.scanId,
                 expectedBlockId: message.expectedBlockId,
                 courseName: message.courseName,
                 sectionName: message.sectionName,
@@ -361,6 +411,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.pendingRetryCount = 0;
             state.cursor = {
                 correlationId: '',
+                scanId: '',
                 expectedBlockId: '',
                 courseName: state.cursor.courseName || '',
                 sectionName: '',

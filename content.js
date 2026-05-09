@@ -170,12 +170,44 @@ function isSkippableNonLectureSequential() {
 }
 
 let currentCorrelationId = null;
+let currentScanId = null;
 let transcriptResolve = null;
-let pendingTranscripts = [];
+let pendingTranscriptState = createPendingTranscriptState();
 let stopRequested = false;
 
 function shouldStop() {
     return stopRequested;
+}
+
+function createPendingTranscriptState() {
+    return {
+        transcripts: [],
+        transcriptKeys: new Set(),
+        isComplete: false
+    };
+}
+
+function resetPendingTranscriptState(correlationId, scanId) {
+    currentCorrelationId = correlationId;
+    currentScanId = scanId;
+    pendingTranscriptState = createPendingTranscriptState();
+}
+
+function appendPendingTranscripts(transcripts) {
+    const items = Array.isArray(transcripts) ? transcripts : [];
+    for (const transcript of items) {
+        const key = transcript?.url || `${transcript?.filename || ''}::${transcript?.videoTitle || ''}`;
+        if (!key || pendingTranscriptState.transcriptKeys.has(key)) continue;
+        pendingTranscriptState.transcriptKeys.add(key);
+        pendingTranscriptState.transcripts.push(transcript);
+    }
+}
+
+function resolveTranscriptWait() {
+    if (!transcriptResolve) return;
+    const resolve = transcriptResolve;
+    transcriptResolve = null;
+    resolve([...pendingTranscriptState.transcripts]);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -195,9 +227,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         handleTranscriptsFoundRelay(message);
     }
 
+    if (message.type === 'TRANSCRIPT_SCAN_COMPLETE_RELAY') {
+        handleTranscriptScanCompleteRelay(message);
+    }
+
     if (message.type === 'STOP_DOWNLOAD') {
         stopRequested = true;
-        pendingTranscripts = [];
+        currentCorrelationId = null;
+        currentScanId = null;
+        pendingTranscriptState = createPendingTranscriptState();
         if (transcriptResolve) {
             transcriptResolve([]);
             transcriptResolve = null;
@@ -225,40 +263,56 @@ function handleGetCourseList(sendResponse) {
 }
 
 function handleTranscriptsFoundRelay(message) {
-    console.log('[IIMBx] TRANSCRIPTS_FOUND_RELAY received:', message.transcripts?.length, 'items, correlationId match:', message.correlationId === currentCorrelationId);
+    console.log(
+        '[IIMBx] TRANSCRIPTS_FOUND_RELAY received:',
+        message.transcripts?.length,
+        'items, correlationId match:',
+        message.correlationId === currentCorrelationId,
+        'scanId match:',
+        message.scanId === currentScanId
+    );
 
-    if (!message.correlationId || message.correlationId !== currentCorrelationId) {
+    if (!message.correlationId || message.correlationId !== currentCorrelationId || !message.scanId || message.scanId !== currentScanId) {
         console.log('[IIMBx] Ignoring stale relay');
         return;
     }
 
-    const transcripts = message.transcripts || [];
-    if (transcriptResolve) {
-        transcriptResolve(transcripts);
-        transcriptResolve = null;
-    } else {
-        pendingTranscripts = transcripts;
-    }
+    appendPendingTranscripts(message.transcripts);
 }
 
-function waitForTranscripts(timeout = 8000) {
+function handleTranscriptScanCompleteRelay(message) {
+    console.log(
+        '[IIMBx] TRANSCRIPT_SCAN_COMPLETE_RELAY received:',
+        'correlationId match:',
+        message.correlationId === currentCorrelationId,
+        'scanId match:',
+        message.scanId === currentScanId
+    );
+
+    if (!message.correlationId || message.correlationId !== currentCorrelationId || !message.scanId || message.scanId !== currentScanId) {
+        console.log('[IIMBx] Ignoring stale scan-complete relay');
+        return;
+    }
+
+    appendPendingTranscripts(message.transcripts);
+    pendingTranscriptState.isComplete = true;
+    resolveTranscriptWait();
+}
+
+function waitForTranscriptScan(timeout = 12000) {
     return new Promise(resolve => {
-        if (pendingTranscripts.length > 0) {
-            const buffered = pendingTranscripts;
-            pendingTranscripts = [];
-            resolve(buffered);
+        if (pendingTranscriptState.isComplete) {
+            resolve([...pendingTranscriptState.transcripts]);
             return;
         }
 
         const timer = setTimeout(() => {
             transcriptResolve = null;
-            pendingTranscripts = [];
-            resolve([]);
+            resolve([...pendingTranscriptState.transcripts]);
         }, timeout);
 
         transcriptResolve = transcripts => {
             clearTimeout(timer);
-            pendingTranscripts = [];
             resolve(transcripts);
         };
     });
@@ -652,12 +706,12 @@ async function processSequentialPage(course, allCourses, courseIdx, savedState) 
     }
     }
 
-    console.log(`[IIMBx] Found ${unitEntries.length} units in sidebar`);
+    const videoUnitCount = unitEntries.filter(unit => unit.isVideoUnit).length;
+    console.log(`[IIMBx] Found ${unitEntries.length} units in sidebar (${videoUnitCount} video-marked)`);
 
     for (let unitIdx = 0; unitIdx < unitEntries.length; unitIdx++) {
         if (shouldStop()) return;
         const unit = unitEntries[unitIdx];
-        const correlationId = `${course.courseId}::${currentSequentialIndex}::${unitIdx}::${Date.now()}`;
         const expectedBlockId = extractVerticalBlockId(unit.url);
 
         console.log(`[IIMBx] Unit ${unitIdx + 1}/${unitEntries.length}: ${unit.title}`);
@@ -681,42 +735,45 @@ async function processSequentialPage(course, allCourses, courseIdx, savedState) 
             continue;
         }
 
-        currentCorrelationId = correlationId;
-        pendingTranscripts = [];
-        transcriptResolve = null;
+        let transcripts = [];
+        const scanAttempts = 2;
 
-        await chrome.runtime.sendMessage({
-            type: 'CURSOR_UPDATE',
-            correlationId,
-            expectedBlockId,
-            courseName: course.name,
-            sectionName: currentSequential.sectionName,
-            unitTitle: unit.title
-        });
+        for (let attempt = 1; attempt <= scanAttempts; attempt++) {
+            const correlationId = `${course.courseId}::${currentSequentialIndex}::${unitIdx}::attempt-${attempt}::${Date.now()}`;
+            const scanId = buildScanId(course.courseId, currentSequentialIndex, unitIdx, attempt);
 
-        try {
-            await waitForElement('#unit-iframe', 4000);
-            await reloadUnitIframe(expectedBlockId);
-            await waitForIframeReady(expectedBlockId, 5000);
-            await delay(1200);
-        } catch (e) {
-            console.log(`[IIMBx] Iframe timeout for unit: ${unit.title}`);
-            await delay(1000);
-            continue;
-        }
+            resetPendingTranscriptState(correlationId, scanId);
+            transcriptResolve = null;
 
-        let transcripts = await waitForTranscripts(5000);
-        if (shouldStop()) return;
-        if (transcripts.length === 0) {
-            console.log(`[IIMBx] No transcripts received on first pass for ${unit.title}, retrying iframe reload`);
+            await chrome.runtime.sendMessage({
+                type: 'CURSOR_UPDATE',
+                correlationId,
+                expectedBlockId,
+                scanId,
+                courseName: course.name,
+                sectionName: currentSequential.sectionName,
+                unitTitle: unit.title
+            });
+
             try {
-                await reloadUnitIframe(expectedBlockId);
-                await waitForIframeReady(expectedBlockId, 5000);
-                await delay(1200);
+                await waitForElement('#unit-iframe', 4000);
+                await reloadUnitIframe(expectedBlockId, scanId);
+                await waitForIframeReady(expectedBlockId, scanId, 5000);
             } catch (e) {
-                // Ignore retry setup failures; the final empty state below will handle it.
+                console.log(`[IIMBx] Iframe timeout for unit: ${unit.title} (attempt ${attempt}/${scanAttempts})`);
+                await delay(800);
+                continue;
             }
-            transcripts = await waitForTranscripts(5000);
+
+            transcripts = await waitForTranscriptScan(14000);
+            if (shouldStop()) return;
+
+            if (transcripts.length > 0 || attempt === scanAttempts) {
+                break;
+            }
+
+            console.log(`[IIMBx] Scan completed with no transcripts for ${unit.title}, retrying (${attempt + 1}/${scanAttempts})`);
+            await delay(800);
         }
 
         if (shouldStop()) return;
@@ -741,13 +798,18 @@ function resolveCurrentSequentialIndex(sequentials, fallbackIndex) {
     return Number.isInteger(fallbackIndex) ? fallbackIndex : 0;
 }
 
+function buildScanId(courseId, sequentialIndex, unitIdx, attempt) {
+    return `${courseId}::${sequentialIndex}::${unitIdx}::scan-${attempt}::${Date.now()}`;
+}
+
 function collectVisibleUnitsFromSidebar() {
     const links = Array.from(document.querySelectorAll('.outline-sidebar a[href*="type@vertical"]'))
-        .filter(link => isVisible(link) && hasVideoUnitIcon(link));
+        .filter(link => isVisible(link));
 
     const units = links.map((link, index) => ({
         url: normalizeVerticalUrl(link.href),
-        title: cleanUnitLabel(link.textContent) || `Unit ${index + 1}`
+        title: cleanUnitLabel(link.textContent) || `Unit ${index + 1}`,
+        isVideoUnit: hasVideoUnitIcon(link)
     }));
 
     return uniqueBy(units, entry => entry.url);
@@ -755,7 +817,7 @@ function collectVisibleUnitsFromSidebar() {
 
 function findVisibleUnitLink(url) {
     return Array.from(document.querySelectorAll('.outline-sidebar a[href*="type@vertical"]'))
-        .find(link => isVisible(link) && hasVideoUnitIcon(link) && normalizeVerticalUrl(link.href) === url) || null;
+        .find(link => isVisible(link) && normalizeVerticalUrl(link.href) === url) || null;
 }
 
 function findVisibleSequentialLink(url) {
@@ -786,15 +848,16 @@ function waitForUnitActivation(expectedBlockId, timeout = 5000) {
     });
 }
 
-function waitForIframeReady(expectedBlockId, timeout = 10000) {
+function waitForIframeReady(expectedBlockId, scanId, timeout = 10000) {
     return new Promise((resolve, reject) => {
         const start = Date.now();
         const timer = setInterval(() => {
             const iframe = document.querySelector('#unit-iframe');
             const src = iframe?.src || '';
-            const matches = expectedBlockId ? src.includes(expectedBlockId) : /xblock|block-v1/.test(src);
+            const blockMatches = expectedBlockId ? src.includes(expectedBlockId) : /xblock|block-v1/.test(src);
+            const scanMatches = scanId ? src.includes(`codex_scan_id=${encodeURIComponent(scanId)}`) : true;
 
-            if (matches) {
+            if (blockMatches && scanMatches) {
                 clearInterval(timer);
                 resolve();
                 return;
@@ -808,7 +871,7 @@ function waitForIframeReady(expectedBlockId, timeout = 10000) {
     });
 }
 
-async function reloadUnitIframe(expectedBlockId) {
+async function reloadUnitIframe(expectedBlockId, scanId) {
     const iframe = document.querySelector('#unit-iframe');
     const currentSrc = iframe?.src || '';
     const matches = expectedBlockId ? currentSrc.includes(expectedBlockId) : /xblock|block-v1/.test(currentSrc);
@@ -817,9 +880,14 @@ async function reloadUnitIframe(expectedBlockId) {
         return false;
     }
 
+    const nextSrc = new URL(currentSrc);
+    if (scanId) {
+        nextSrc.searchParams.set('codex_scan_id', scanId);
+    }
+
     iframe.src = 'about:blank';
     await delay(250);
-    iframe.src = currentSrc;
+    iframe.src = nextSrc.toString();
     return true;
 }
 
