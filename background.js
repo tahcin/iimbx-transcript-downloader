@@ -27,7 +27,8 @@ function createDefaultState() {
         pendingRetryCount: 0,
         stopRequested: false,
         isCrawling: false,
-        isRunning: false
+        isRunning: false,
+        lastError: ''
     };
 }
 
@@ -122,7 +123,8 @@ function buildProgressSnapshot(status) {
         errors: state.stats.errors,
         activeDownloads: Object.keys(state.activeDownloads).length,
         percent: state.stats.total > 0
-            ? Math.round((state.stats.completed / state.stats.total) * 100) : 0
+            ? Math.round((state.stats.completed / state.stats.total) * 100) : 0,
+        errorMessage: state.lastError || ''
     };
 }
 
@@ -137,10 +139,6 @@ function isScannableIframeUrl(iframeSrc) {
 
 function extractVerticalBlockPath(value) {
     return value?.match(/block-v1:[^/?#]+type@vertical\+block@[A-Za-z0-9]+/)?.[0] || '';
-}
-
-function extractSequentialBlockPath(value) {
-    return value?.match(/block-v1:[^/?#]+type@sequential\+block@[A-Za-z0-9]+/)?.[0] || '';
 }
 
 function buildXblockUrl(unitUrl, scanId) {
@@ -160,53 +158,94 @@ function buildXblockUrl(unitUrl, scanId) {
     return url.toString();
 }
 
-function buildSequentialXblockUrl(sequentialUrl) {
-    const sequentialBlockPath = extractSequentialBlockPath(sequentialUrl);
-    if (!sequentialBlockPath) return '';
+let cachedUsername = null;
 
-    const url = new URL(`https://iimbx.edu.in/xblock/${sequentialBlockPath}`);
-    url.searchParams.set('exam_access', '');
-    url.searchParams.set('jumpToId', '');
-    url.searchParams.set('recheck_access', '1');
-    url.searchParams.set('show_bookmark', '0');
-    url.searchParams.set('show_title', '0');
-    url.searchParams.set('view', 'student_view');
-    return url.toString();
+async function fetchUsername(courseId) {
+    if (cachedUsername) return cachedUsername;
+    try {
+        const url = `https://iimbx.edu.in/api/learning_sequences/v1/course_outline/${courseId}`;
+        const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data.username) {
+            cachedUsername = data.username;
+            console.log(`[BG] Cached username: ${cachedUsername}`);
+        }
+        return cachedUsername;
+    } catch (e) {
+        console.warn('[BG] fetchUsername failed:', e);
+        return null;
+    }
 }
 
-function collectChildBlocksFromHtml(html, parentBlockPath) {
-    const verticals = new Map();
-    const sequentials = new Map();
-    const source = html || '';
+async function fetchCourseBlocks(courseId, username) {
+    const params = new URLSearchParams({
+        course_id: courseId,
+        username,
+        depth: 'all',
+        requested_fields: 'display_name,children,type,student_view_url'
+    });
+    try {
+        const response = await fetch(`https://iimbx.edu.in/api/courses/v2/blocks/?${params}`, {
+            credentials: 'include',
+            cache: 'no-store'
+        });
+        if (!response.ok) {
+            console.warn(`[BG] Blocks API HTTP ${response.status}`);
+            return null;
+        }
+        return await response.json();
+    } catch (e) {
+        console.warn('[BG] fetchCourseBlocks failed:', e);
+        return null;
+    }
+}
 
-    const verticalRegex = /block-v1:[A-Za-z0-9_+:.-]+type@vertical\+block@[A-Za-z0-9]+/g;
-    let match;
-    while ((match = verticalRegex.exec(source))) {
-        const path = match[0];
-        if (!verticals.has(path)) {
-            verticals.set(path, {
-                url: `https://iimbx.edu.in/xblock/${path}?view=student_view`,
-                blockPath: path
-            });
+function flattenBlocksToUnits(blocksResponse) {
+    if (!blocksResponse?.blocks || !blocksResponse?.root) return [];
+    const blocks = blocksResponse.blocks;
+    const root = blocks[blocksResponse.root];
+    if (!root) return [];
+
+    const units = [];
+
+    for (const chapterId of (root.children || [])) {
+        const chapter = blocks[chapterId];
+        if (!chapter || chapter.type !== 'chapter') continue;
+        const chapterTitle = chapter.display_name || '';
+
+        for (const sequentialId of (chapter.children || [])) {
+            const sequential = blocks[sequentialId];
+            if (!sequential || sequential.type !== 'sequential') continue;
+            const sequentialTitle = sequential.display_name || '';
+
+            for (const verticalId of (sequential.children || [])) {
+                const vertical = blocks[verticalId];
+                if (!vertical || vertical.type !== 'vertical') continue;
+
+                units.push({
+                    chapterTitle,
+                    sequentialTitle,
+                    unitTitle: vertical.display_name || '',
+                    unitUrl: vertical.student_view_url || vertical.lms_web_url || vertical.id || '',
+                    unitBlockId: vertical.block_id || ''
+                });
+            }
         }
     }
 
-    const sequentialRegex = /block-v1:[A-Za-z0-9_+:.-]+type@sequential\+block@[A-Za-z0-9]+/g;
-    while ((match = sequentialRegex.exec(source))) {
-        const path = match[0];
-        if (parentBlockPath && path === parentBlockPath) continue;
-        if (!sequentials.has(path)) {
-            sequentials.set(path, {
-                url: `https://iimbx.edu.in/xblock/${path}?view=student_view`,
-                blockPath: path
-            });
-        }
-    }
+    return units;
+}
 
-    return {
-        verticals: [...verticals.values()],
-        sequentials: [...sequentials.values()]
-    };
+async function fetchCourseOutlineFromApi(courseId) {
+    const username = await fetchUsername(courseId);
+    if (!username) {
+        console.log('[BG] No username available; cannot use blocks API');
+        return null;
+    }
+    const blocks = await fetchCourseBlocks(courseId, username);
+    if (!blocks) return null;
+    return flattenBlocksToUnits(blocks);
 }
 
 function decodeHtmlEntities(value) {
@@ -576,46 +615,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'scan_context_registered' });
         }
 
-        if (message.type === 'FETCH_SEQUENTIAL_UNITS') {
-            const sequentialXblockUrl = buildSequentialXblockUrl(message.sequentialUrl);
-            if (!sequentialXblockUrl) {
-                sendResponse({
-                    status: 'error',
-                    reason: 'invalid_sequential_url',
-                    verticals: [],
-                    sequentials: []
-                });
-                return;
+        if (message.type === 'FETCH_COURSE_OUTLINE') {
+            const units = await fetchCourseOutlineFromApi(message.courseId);
+            if (Array.isArray(units) && units.length > 0) {
+                const chapterCount = new Set(units.map(u => u.chapterTitle)).size;
+                console.log(`[BG] Course outline: ${units.length} verticals across ${chapterCount} chapters`);
+                sendResponse({ status: 'fetched', units });
+            } else {
+                sendResponse({ status: 'error', units: [] });
             }
+            return;
+        }
 
-            try {
-                const response = await fetch(sequentialXblockUrl, {
-                    credentials: 'include',
-                    cache: 'no-store'
-                });
-                if (!response.ok) {
-                    sendResponse({
-                        status: 'error',
-                        reason: `http_${response.status}`,
-                        verticals: [],
-                        sequentials: []
-                    });
-                    return;
-                }
-                const html = await response.text();
-                const parentBlockPath = extractSequentialBlockPath(message.sequentialUrl);
-                const { verticals, sequentials } = collectChildBlocksFromHtml(html, parentBlockPath);
-                console.log(`[BG] Sequential outline for ${message.sequentialTitle || parentBlockPath}: ${verticals.length} verticals, ${sequentials.length} child sequentials`);
-                sendResponse({ status: 'fetched', verticals, sequentials });
-            } catch (e) {
-                console.warn(`[BG] FETCH_SEQUENTIAL_UNITS failed:`, e);
-                sendResponse({
-                    status: 'error',
-                    reason: e?.message || 'fetch_failed',
-                    verticals: [],
-                    sequentials: []
-                });
-            }
+        if (message.type === 'REPORT_ERROR') {
+            console.error(`[BG] Reported error: ${message.reason}`);
+            state.lastError = message.reason || 'Unknown error';
+            state.isRunning = false;
+            state.isCrawling = false;
+            await saveState();
+            await broadcastProgress('error');
+            sendResponse({ status: 'error_recorded' });
             return;
         }
 
@@ -702,6 +721,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         if (message.type === 'RESET_STATE') {
             state = createDefaultState();
+            cachedUsername = null;
             await saveState();
             sendResponse({ status: 'reset' });
         }

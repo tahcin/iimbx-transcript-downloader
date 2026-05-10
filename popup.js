@@ -162,13 +162,22 @@ function updateProgress(data) {
     return;
   }
 
+  if (data.status === 'error') {
+    stopProgressPolling();
+    showOnly(completeSection);
+    completeSummary.innerHTML =
+      `<strong>${data.downloaded || 0}</strong> transcripts downloaded` +
+      (data.errors > 0 ? `<br>${data.errors} errors` : '') +
+      `<br>${data.errorMessage || 'Error occurred. See console.'}`;
+    return;
+  }
+
   startProgressPolling();
   showOnly(progressSection);
 
   const statusMap = {
     downloading: 'Downloading...',
     crawl_complete: 'Finishing downloads...',
-    error: 'Error occurred',
     stopped: 'Stopped',
     idle: 'Idle'
   };

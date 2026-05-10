@@ -8,121 +8,12 @@ function normalizeWhitespace(text) {
     return (text || '').replace(/\s+/g, ' ').trim();
 }
 
-function cleanSectionLabel(text) {
-    return normalizeWhitespace(text).replace(/,\s*(Incomplete|Complete)\s*section$/i, '').trim();
-}
-
-function cleanUnitLabel(text) {
-    return normalizeWhitespace(text).replace(/,\s*(Incomplete|Complete)\s*unit$/i, '').trim();
-}
-
-function toAbsoluteUrl(href) {
-    try {
-        return new URL(href, window.location.href);
-    } catch (e) {
-        return null;
-    }
-}
-
 function extractCourseId(value) {
     return value?.match(/course-v1:[^/?#]+/)?.[0] || '';
 }
 
-function extractSequentialBlockId(value) {
-    return value?.match(/block-v1:[^/?#]+type@sequential\+block@[A-Za-z0-9]+/)?.[0] || '';
-}
-
 function extractVerticalBlockId(value) {
     return value?.match(/type@vertical\+block@([A-Za-z0-9]+)/)?.[1] || '';
-}
-
-function normalizeSequentialUrl(href, courseId) {
-    const parsed = toAbsoluteUrl(href);
-    if (!parsed) return '';
-
-    if (parsed.hostname === 'apps.iimbx.edu.in') {
-        return parsed.toString();
-    }
-
-    const blockId = extractSequentialBlockId(parsed.toString());
-    const resolvedCourseId = courseId || extractCourseId(parsed.toString());
-    if (blockId && resolvedCourseId) {
-        return `https://apps.iimbx.edu.in/learning/course/${resolvedCourseId}/${blockId}`;
-    }
-
-    return '';
-}
-
-function isVisible(element) {
-    return !!element && element.getClientRects().length > 0;
-}
-
-function uniqueBy(items, keyFn) {
-    const seen = new Set();
-    return items.filter(item => {
-        const key = keyFn(item);
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-    });
-}
-
-function parseOutlineNumbers(text) {
-    const normalized = normalizeWhitespace(text);
-    const match = normalized.match(/^(\d+(?:\.\d+)*)/);
-    if (match) {
-        return match[1].split('.').map(value => Number.parseInt(value, 10));
-    }
-
-    const moduleMatch = normalized.match(/^Module\s+(\d+)/i);
-    if (moduleMatch) {
-        return [Number.parseInt(moduleMatch[1], 10)];
-    }
-
-    return [];
-}
-
-function compareOutlineEntries(left, right) {
-    const leftNumbers = parseOutlineNumbers(left.title);
-    const rightNumbers = parseOutlineNumbers(right.title);
-    const length = Math.max(leftNumbers.length, rightNumbers.length);
-
-    for (let index = 0; index < length; index++) {
-        const leftValue = leftNumbers[index] ?? -1;
-        const rightValue = rightNumbers[index] ?? -1;
-        if (leftValue !== rightValue) {
-            return leftValue - rightValue;
-        }
-    }
-
-    return left.title.localeCompare(right.title);
-}
-
-function extractSectionNumber(sectionName) {
-    const match = normalizeWhitespace(sectionName).match(/^Section\s+(\d+):/i);
-    return match ? Number.parseInt(match[1], 10) : null;
-}
-
-function extractModuleNumber(sectionName) {
-    const match = normalizeWhitespace(sectionName).match(/^Module\s+(\d+)\s*(?:\||:)/i);
-    return match ? Number.parseInt(match[1], 10) : null;
-}
-
-function isSequentialTitle(text) {
-    return /^\d+\.\d+\s+\S+/.test(normalizeWhitespace(text));
-}
-
-function isModuleTitle(text) {
-    return /^Module\s+\d+\s*(?:\||:)/i.test(normalizeWhitespace(text));
-}
-
-function isOutlineEntryTitle(text) {
-    return isSequentialTitle(text) || isModuleTitle(text);
-}
-
-function isHomeContainerTitle(text) {
-    const normalized = normalizeWhitespace(text);
-    return /^Section\s+\d+:/i.test(normalized) || /^Module\s+\d+\s*(?:\||:)/i.test(normalized);
 }
 
 let stopRequested = false;
@@ -175,8 +66,8 @@ async function handleStartDownload(courses) {
         state: 'NAVIGATING_TO_COURSE',
         selectedCourses: courses,
         currentCourseIndex: 0,
-        sequentials: [],
-        currentSequentialIndex: 0
+        units: [],
+        currentUnitIndex: 0
     });
 
     const firstCourse = courses[0];
@@ -204,13 +95,13 @@ async function resumeProcessing(savedState) {
     console.log(`[IIMBx] Resume: state=${savedState.state}, course=${course.name}, url=${currentUrl.substring(0, 120)}`);
 
     if (currentUrl.includes('/home')) {
-        if (savedState.state === 'PROCESSING_SEQUENTIALS'
-            && Array.isArray(savedState.sequentials)
-            && savedState.sequentials.length > 0) {
-            const startIdx = Number.isInteger(savedState.currentSequentialIndex) ? savedState.currentSequentialIndex : 0;
-            await processSequentialsList(course, selectedCourses, currentCourseIndex, savedState.sequentials, startIdx);
+        if (savedState.state === 'PROCESSING_UNITS'
+            && Array.isArray(savedState.units)
+            && savedState.units.length > 0) {
+            const startIdx = Number.isInteger(savedState.currentUnitIndex) ? savedState.currentUnitIndex : 0;
+            await processCourseUnits(course, selectedCourses, currentCourseIndex, savedState.units, startIdx);
         } else {
-            await crawlCourseHome(course, selectedCourses, currentCourseIndex);
+            await loadCourseOutline(course, selectedCourses, currentCourseIndex);
         }
         return;
     }
@@ -223,333 +114,93 @@ async function resumeProcessing(savedState) {
     window.location.href = buildCourseHomeUrl(course.courseId);
 }
 
-async function crawlCourseHome(course, allCourses, courseIdx) {
+async function loadCourseOutline(course, allCourses, courseIdx) {
     if (shouldStop()) return;
-    console.log(`[IIMBx] Collecting sequentials from course home: ${course.name}`);
+    console.log(`[IIMBx] Loading outline for: ${course.name}`);
     await saveProcessingState({
-        state: 'CRAWLING_COURSE_HOME',
+        state: 'LOADING_OUTLINE',
         selectedCourses: allCourses,
         currentCourseIndex: courseIdx,
-        sequentials: [],
-        currentSequentialIndex: 0
+        units: [],
+        currentUnitIndex: 0
     });
 
-    await waitForCourseHomeReady();
-    let sequentials = await collectAllSequentialsFromHome(course.courseId);
+    const apiResult = await chrome.runtime.sendMessage({
+        type: 'FETCH_COURSE_OUTLINE',
+        courseId: course.courseId
+    });
 
-    console.log(`[IIMBx] Found ${sequentials.length} sequential links on course home`);
-
-    if (sequentials.length === 0) {
-        console.error('[IIMBx] No sequential links found on course home');
-        await delay(2000);
-        sequentials = await collectAllSequentialsFromHome(course.courseId, 10);
-        console.log(`[IIMBx] Retry found ${sequentials.length} sequential links on course home`);
-        if (sequentials.length === 0) {
-            await moveToNextCourse(allCourses, courseIdx);
-            return;
-        }
-    }
-
-    if (sequentials.length === 0) {
+    if (apiResult?.status === 'fetched' && Array.isArray(apiResult.units) && apiResult.units.length > 0) {
+        console.log(`[IIMBx] Outline: ${apiResult.units.length} verticals`);
+        await saveProcessingState({
+            state: 'PROCESSING_UNITS',
+            selectedCourses: allCourses,
+            currentCourseIndex: courseIdx,
+            units: apiResult.units,
+            currentUnitIndex: 0
+        });
+        await processCourseUnits(course, allCourses, courseIdx, apiResult.units, 0);
         return;
     }
 
-    await saveProcessingState({
-        state: 'PROCESSING_SEQUENTIALS',
-        selectedCourses: allCourses,
-        currentCourseIndex: courseIdx,
-        sequentials,
-        currentSequentialIndex: 0
+    console.error(`[IIMBx] Could not load outline for ${course.name} via blocks API`);
+    await chrome.runtime.sendMessage({
+        type: 'REPORT_ERROR',
+        reason: `Could not load outline for "${course.name}". Refresh your IIMBx login and retry.`
     });
-
-    await processSequentialsList(course, allCourses, courseIdx, sequentials, 0);
+    await clearProcessingState();
 }
 
-async function expandAllHomeSections() {
-    const expandAll = Array.from(document.querySelectorAll('button, a, [role="button"]'))
-        .find(element => /expand all/i.test(normalizeWhitespace(element.textContent)));
+async function processCourseUnits(course, allCourses, courseIdx, units, startIdx) {
+    let unitIdx = Number.isInteger(startIdx) ? startIdx : 0;
 
-    if (expandAll) {
-        expandAll.click();
-        await delay(1500);
-    }
-}
-
-async function clickVisiblePlusControls() {
-    const plusControls = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'))
-        .filter(element => isVisible(element) && normalizeWhitespace(element.textContent) === '+');
-
-    for (const control of plusControls) {
-        control.click();
-        await delay(250);
-    }
-}
-
-async function collectAllSequentialsFromHome(courseId, maxPasses = 6) {
-    if (shouldStop()) return [];
-    await expandAllHomeSections();
-    await delay(1000);
-
-    let sequentials = [];
-    let previousCount = -1;
-
-    for (let pass = 0; pass < maxPasses; pass++) {
-        if (shouldStop()) return sequentials;
-        sequentials = uniqueBy(
-            [...sequentials, ...collectSequentialsFromHome(courseId)],
-            entry => entry.url
-        ).sort(compareOutlineEntries);
-
-        const missingSections = getHomeSectionHeadings()
-            .filter(section => {
-                const sectionNumber = extractSectionNumber(section.title);
-                const moduleNumber = extractModuleNumber(section.title);
-                const containerNumber = sectionNumber ?? moduleNumber;
-                return containerNumber != null && !sequentials.some(entry => parseOutlineNumbers(entry.title)[0] === containerNumber);
-            });
-
-        if (missingSections.length > 0) {
-            for (const section of missingSections) {
-                const expanded = await expandHomeSection(section);
-                if (expanded) {
-                    await delay(800);
-                    sequentials = uniqueBy(
-                        [...sequentials, ...collectSequentialsFromHome(courseId)],
-                        entry => entry.url
-                    ).sort(compareOutlineEntries);
-                }
-            }
-        }
-
-        if (sequentials.length === previousCount) {
-            const expanded = await expandCollapsedHomeSections();
-            if (!expanded) break;
-        } else {
-            previousCount = sequentials.length;
-            await clickVisiblePlusControls();
-            await delay(800);
-        }
-    }
-
-    return sequentials;
-}
-
-function getHomeSectionHeadings() {
-    return Array.from(document.querySelectorAll('div, span'))
-        .map(element => ({
-            element,
-            title: cleanSectionLabel(element.textContent)
-        }))
-        .filter(entry => isHomeContainerTitle(entry.title))
-        .filter(entry => isVisible(entry.element))
-        .sort((left, right) => {
-            const leftNumber = extractSectionNumber(left.title) ?? extractModuleNumber(left.title) ?? 0;
-            const rightNumber = extractSectionNumber(right.title) ?? extractModuleNumber(right.title) ?? 0;
-            return leftNumber - rightNumber;
-        });
-}
-
-async function expandHomeSection(sectionEntry) {
-    const row = findSectionRow(sectionEntry.element);
-    if (!row) return false;
-
-    const rowText = normalizeWhitespace(row.textContent);
-    if (/-$/.test(rowText)) {
-        return false;
-    }
-
-    const toggle = Array.from(row.querySelectorAll('button, a, [role="button"], div, span'))
-        .find(element => isVisible(element) && /^[+]$/.test(normalizeWhitespace(element.textContent)));
-
-    if (toggle) {
-        toggle.click();
-        return true;
-    }
-
-    row.click();
-    return true;
-}
-
-function findSectionRow(element) {
-    let current = element;
-    while (current && current !== document.body) {
-        const text = normalizeWhitespace(current.textContent);
-        if (isHomeContainerTitle(text)) {
-            return current;
-        }
-        current = current.parentElement;
-    }
-    return element.parentElement;
-}
-
-async function waitForCourseHomeReady(timeout = 15000) {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-        const hasSectionHeading = Array.from(document.querySelectorAll('div, span'))
-            .some(element => isHomeContainerTitle(normalizeWhitespace(element.textContent)));
-        const hasSequentialLink = document.querySelector('a[href*="type@sequential"], a[href*="/jump_to/"]');
-
-        if (hasSectionHeading || hasSequentialLink) {
-            await delay(800);
-            return;
-        }
-
-        await delay(500);
-    }
-}
-
-async function expandCollapsedHomeSections() {
-    const rows = Array.from(document.querySelectorAll('div, section, article'));
-    let expandedAny = false;
-
-    for (const row of rows) {
-        const text = normalizeWhitespace(row.textContent);
-        if (!isHomeContainerTitle(text)) continue;
-
-        const clickable = Array.from(row.querySelectorAll('button, a, [role="button"], div, span'))
-            .find(element => isVisible(element) && /^[+]$/.test(normalizeWhitespace(element.textContent)));
-
-        if (!clickable) continue;
-
-        clickable.click();
-        expandedAny = true;
-        await delay(500);
-    }
-
-    return expandedAny;
-}
-
-function collectSequentialsFromHome(courseId) {
-    const items = Array.from(document.querySelectorAll('div.font-weight-bold.text-dark-500, a[href]'));
-
-    let currentSectionName = '';
-    const sequentials = [];
-
-    for (const item of items) {
-        const text = normalizeWhitespace(item.textContent);
-
-        if (!item.matches('a') && isHomeContainerTitle(text)) {
-            currentSectionName = cleanSectionLabel(text);
-            continue;
-        }
-
-        if (!item.matches('a')) continue;
-
-        const title = cleanUnitLabel(text);
-        if (!isOutlineEntryTitle(title)) continue;
-
-        const url = normalizeSequentialUrl(item.href, courseId);
-        if (!url || !title) continue;
-
-        sequentials.push({
-            url,
-            title,
-            sectionName: currentSectionName || title
-        });
-    }
-
-    return uniqueBy(sequentials, entry => entry.url).sort(compareOutlineEntries);
-}
-
-async function processSequentialsList(course, allCourses, courseIdx, initialSequentials, startIdx) {
-    let workingSequentials = initialSequentials.map(entry => ({ ...entry }));
-    let seqIdx = Number.isInteger(startIdx) ? startIdx : 0;
-
-    while (seqIdx < workingSequentials.length) {
+    while (unitIdx < units.length) {
         if (shouldStop()) return;
-        const sequential = workingSequentials[seqIdx];
+        const unit = units[unitIdx];
 
         await saveProcessingState({
-            state: 'PROCESSING_SEQUENTIALS',
+            state: 'PROCESSING_UNITS',
             selectedCourses: allCourses,
             currentCourseIndex: courseIdx,
-            sequentials: workingSequentials,
-            currentSequentialIndex: seqIdx
+            units,
+            currentUnitIndex: unitIdx
         });
 
-        console.log(`[IIMBx] Processing sequential ${seqIdx + 1}/${workingSequentials.length}: ${sequential.title}`);
+        const sectionName = unit.chapterTitle || unit.sequentialTitle || course.name;
+        const unitLabel = `${unit.chapterTitle} > ${unit.sequentialTitle} > ${unit.unitTitle}`.trim();
+        console.log(`[IIMBx] Unit ${unitIdx + 1}/${units.length}: ${unitLabel}`);
 
-        const fetchResult = await chrome.runtime.sendMessage({
-            type: 'FETCH_SEQUENTIAL_UNITS',
-            sequentialUrl: sequential.url,
-            sequentialTitle: sequential.title
+        const expectedBlockId = unit.unitBlockId || extractVerticalBlockId(unit.unitUrl);
+        const correlationId = `${course.courseId}::${unitIdx}::attempt-1::${Date.now()}`;
+        const scanId = `${course.courseId}::${unitIdx}::scan-1::${Date.now()}`;
+
+        await chrome.runtime.sendMessage({
+            type: 'FETCH_UNIT_TRANSCRIPTS',
+            correlationId,
+            expectedBlockId,
+            scanId,
+            unitUrl: unit.unitUrl,
+            courseName: course.name,
+            sectionName,
+            unitTitle: unit.unitTitle
         });
 
-        if (shouldStop()) return;
+        await chrome.runtime.sendMessage({
+            type: 'CURSOR_UPDATE',
+            correlationId,
+            expectedBlockId,
+            scanId,
+            courseName: course.name,
+            sectionName,
+            unitTitle: unit.unitTitle
+        });
 
-        const verticals = Array.isArray(fetchResult?.verticals) ? fetchResult.verticals : [];
-        const childSequentials = Array.isArray(fetchResult?.sequentials) ? fetchResult.sequentials : [];
-
-        if (verticals.length === 0 && childSequentials.length > 0) {
-            console.log(`[IIMBx] Expanding ${sequential.title} into ${childSequentials.length} child sequentials`);
-            const expanded = childSequentials.map((child, idx) => ({
-                url: child.url,
-                title: `${sequential.title} > ${idx + 1}`,
-                sectionName: sequential.title
-            }));
-            workingSequentials = [
-                ...workingSequentials.slice(0, seqIdx),
-                ...expanded,
-                ...workingSequentials.slice(seqIdx + 1)
-            ];
-            continue;
-        }
-
-        if (verticals.length === 0) {
-            console.log(`[IIMBx] No units found in ${sequential.title}, advancing`);
-            seqIdx += 1;
-            continue;
-        }
-
-        const sectionName = sequential.sectionName || sequential.title;
-
-        for (let unitIdx = 0; unitIdx < verticals.length; unitIdx++) {
-            if (shouldStop()) return;
-            const unit = verticals[unitIdx];
-            const expectedBlockId = extractVerticalBlockId(unit.url);
-            const correlationId = `${course.courseId}::${seqIdx}::${unitIdx}::attempt-1::${Date.now()}`;
-            const scanId = buildScanId(course.courseId, seqIdx, unitIdx, 1);
-            const unitTitle = unit.title || `${sequential.title} unit ${unitIdx + 1}`;
-
-            console.log(`[IIMBx] Unit ${unitIdx + 1}/${verticals.length}: ${unitTitle}`);
-
-            const fetched = await chrome.runtime.sendMessage({
-                type: 'FETCH_UNIT_TRANSCRIPTS',
-                correlationId,
-                expectedBlockId,
-                scanId,
-                unitUrl: unit.url,
-                courseName: course.name,
-                sectionName,
-                unitTitle
-            });
-
-            await chrome.runtime.sendMessage({
-                type: 'CURSOR_UPDATE',
-                correlationId,
-                expectedBlockId,
-                scanId,
-                courseName: course.name,
-                sectionName,
-                unitTitle
-            });
-
-            if (!Array.isArray(fetched?.transcripts) || fetched.transcripts.length === 0) {
-                console.log(`[IIMBx] No transcripts for ${unitTitle}`);
-            }
-
-            await delay(200);
-        }
-
-        seqIdx += 1;
+        await delay(150);
+        unitIdx += 1;
     }
 
     if (shouldStop()) return;
     await moveToNextCourse(allCourses, courseIdx);
-}
-
-function buildScanId(courseId, sequentialIndex, unitIdx, attempt) {
-    return `${courseId}::${sequentialIndex}::${unitIdx}::scan-${attempt}::${Date.now()}`;
 }
 
 async function moveToNextCourse(allCourses, currentIdx) {
@@ -562,8 +213,8 @@ async function moveToNextCourse(allCourses, currentIdx) {
             state: 'NAVIGATING_TO_COURSE',
             selectedCourses: allCourses,
             currentCourseIndex: nextIdx,
-            sequentials: [],
-            currentSequentialIndex: 0
+            units: [],
+            currentUnitIndex: 0
         });
         window.location.href = buildCourseHomeUrl(nextCourse.courseId);
     } else {
@@ -572,7 +223,7 @@ async function moveToNextCourse(allCourses, currentIdx) {
 }
 
 async function saveProcessingState(nextState) {
-    console.log(`[IIMBx] State: ${nextState.state}, course ${nextState.currentCourseIndex}, sequential ${nextState.currentSequentialIndex ?? 0}`);
+    console.log(`[IIMBx] State: ${nextState.state}, course ${nextState.currentCourseIndex}, unit ${nextState.currentUnitIndex ?? 0}`);
     await chrome.storage.local.set({ processingState: nextState });
 }
 
