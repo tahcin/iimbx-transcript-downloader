@@ -4,13 +4,15 @@ Chrome / Brave extension that bulk-downloads transcript PDFs from your enrolled 
 
 ## How it works
 
-The extension talks directly to the Open edX JSON APIs that the IIMBx site is built on, so there's no DOM scraping, no page navigation per unit, and no dependence on the course page layout:
+The extension talks directly to the Open edX JSON APIs that the IIMBx site is built on, so there's no DOM scraping, no page navigation, and no dependence on the course page layout:
 
 1. `GET /api/learner_home/init/` — lists your enrolled courses.
-2. `GET /api/courses/v2/blocks/?course_id=…&depth=all` — returns the entire course tree (chapter → sequential → vertical) for each selected course.
+2. `GET /api/courses/v2/blocks/?course_id=…&depth=all` — returns the entire course tree (chapter → sequential → vertical) for each selected course. Cached for 1 hour.
 3. `GET /xblock/<vertical-block>?view=student_view` — returns each unit's HTML, which is parsed for transcript PDF anchors.
 
-All HTTP work runs in the service worker with your existing iimbx.edu.in session cookies. The dashboard tab only needs to be open so the popup has a target tab and your cookies stay warm; everything is fetched in the background. Up to 5 unit fetches run in parallel.
+Everything runs in the service worker using your existing iimbx.edu.in session cookies. There is no content script and no dashboard tab requirement — open the popup from any tab. Up to 5 unit fetches run in parallel; downloads are managed by Chrome's download manager.
+
+If the service worker is evicted mid-run, it picks back up where it left off the next time the popup opens (URL-level dedup keeps already-downloaded files from being re-fetched).
 
 ## What it downloads
 
@@ -39,26 +41,23 @@ To use the extension, also turn off Chrome / Brave's *"Ask where to save each fi
 ## Usage
 
 1. Log in to IIMBx in the same browser profile.
-2. Open the learner dashboard: `https://apps.iimbx.edu.in/learner-dashboard/`
-3. Click the extension icon.
-4. The popup lists every enrolled course. Use the search box to filter, click the checkboxes to pick the ones you want, then **Download transcripts**.
-5. Watch the progress in the popup, or background the tab — fetches happen in the service worker so throttling doesn't matter.
+2. Click the extension icon. (You don't need to be on the dashboard — any tab works as long as you're logged in.)
+3. The popup lists every enrolled course. Use the search box to filter, click the checkboxes to pick the ones you want, then **Download transcripts**.
+4. Close the popup if you want — the run continues in the background.
 
-The popup shows the live download counter, the chapter currently being scanned, the unit a worker is on, and an in-flight count. **Stop** halts the active run. **New download** clears state and re-queries the dashboard.
+The popup shows the live download counter, the chapter currently being scanned, the unit a worker is on, and an in-flight count. **Stop** halts the active run. If any downloads fail after the auto-retry, **Retry failed** appears on the completion screen. **New download** clears state and re-queries the dashboard.
 
 ## Permissions
 
 - `downloads` — save the PDFs
-- `storage`, `unlimitedStorage` — persist run state across page reloads
-- `activeTab`, `scripting` — communicate with the dashboard tab
-- Host: `https://apps.iimbx.edu.in/*`, `https://iimbx.edu.in/*`
+- `storage`, `unlimitedStorage` — persist run state and the outline cache
+- Host: `https://apps.iimbx.edu.in/*`, `https://iimbx.edu.in/*` — for API calls and xblock fetches
 
 ## Files
 
 - `manifest.json` — MV3 manifest
-- `popup.html` / `popup.css` / `popup.js` — popup UI and orchestration
-- `background.js` — service worker: API calls, parallel fetch coordinator, download manager, state
-- `content.js` — minimal content script on the dashboard tab; just brokers messages
+- `popup.html` / `popup.css` / `popup.js` — popup UI
+- `background.js` — service worker: API calls, parallel fetch coordinator, download manager, state, retry
 - `icons/` — toolbar icons
 
 ## License

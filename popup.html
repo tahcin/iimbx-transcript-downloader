@@ -134,7 +134,16 @@
             <section id="complete-section" class="panel hidden">
                 <div id="complete-icon-box" class="complete-mark complete-mark-success" aria-hidden="true"></div>
                 <div id="complete-summary" class="complete-summary"></div>
-                <button id="restart-btn" class="btn-primary">
+                <button id="retry-failed-btn" class="btn-primary hidden">
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5"
+                            stroke-linecap="round" />
+                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                    </svg>
+                    <span id="retry-failed-label">Retry failed</span>
+                </button>
+                <button id="restart-btn" class="btn-ghost">
                     <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
                         <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5"
                             stroke-linecap="round" />

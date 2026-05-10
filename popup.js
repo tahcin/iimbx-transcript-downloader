@@ -13,6 +13,8 @@ const courseSearch = document.getElementById('course-search');
 const courseEmpty = document.getElementById('course-empty');
 const startBtn = document.getElementById('start-download');
 const restartBtn = document.getElementById('restart-btn');
+const retryFailedBtn = document.getElementById('retry-failed-btn');
+const retryFailedLabel = document.getElementById('retry-failed-label');
 const stopBtn = document.getElementById('stop-download');
 
 const statusText = document.getElementById('status-text');
@@ -46,19 +48,11 @@ const ERROR_ICON = `<svg viewBox="0 0 24 24" fill="none">
 </svg>`;
 
 let courses = [];
-let tabId = null;
-let progressPollTimer = null;
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 function showOnly(section) {
   [notOnDashboard, loadingState, courseSelection, progressSection, completeSection]
-    .forEach(element => element.classList.add('hidden'));
-  if (section) {
-    section.classList.remove('hidden');
-  }
+    .forEach(el => el.classList.add('hidden'));
+  if (section) section.classList.remove('hidden');
 }
 
 function pad3(n) {
@@ -67,46 +61,6 @@ function pad3(n) {
 
 function setMeta(el, value) {
   el.textContent = value && String(value).trim() ? value : '—';
-}
-
-function stopProgressPolling() {
-  if (progressPollTimer) {
-    clearInterval(progressPollTimer);
-    progressPollTimer = null;
-  }
-}
-
-function startProgressPolling() {
-  if (progressPollTimer) return;
-  progressPollTimer = setInterval(async () => {
-    try {
-      const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
-      if (progress) updateProgress(progress);
-    } catch (e) {
-      // Background may be temporarily unavailable; next tick will retry.
-    }
-  }, 1000);
-}
-
-function waitForTabUrl(tabIdToWatch, matcher, timeout = 15000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(handleUpdated);
-      reject(new Error('Timed out waiting for tab update'));
-    }, timeout);
-
-    function handleUpdated(updatedTabId, changeInfo, tab) {
-      if (updatedTabId !== tabIdToWatch) return;
-      if (changeInfo.status !== 'complete') return;
-      if (matcher(tab.url || '')) {
-        clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(handleUpdated);
-        resolve(tab);
-      }
-    }
-
-    chrome.tabs.onUpdated.addListener(handleUpdated);
-  });
 }
 
 function updateStartButton() {
@@ -211,8 +165,7 @@ function renderProgress(data) {
   statusText.textContent = bits.join(' · ');
 }
 
-function showFinalState(data, kind) {
-  stopProgressPolling();
+async function showFinalState(data, kind) {
   showOnly(completeSection);
 
   const iconHtml = kind === 'error' ? ERROR_ICON : (kind === 'stopped' ? STOPPED_ICON : COMPLETE_ICON);
@@ -237,6 +190,23 @@ function showFinalState(data, kind) {
       + (data.errorMessage || 'Unknown error');
   }
   completeSummary.innerHTML = html;
+
+  await refreshFailedBadge();
+}
+
+async function refreshFailedBadge() {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'GET_FAILED_DOWNLOADS' });
+    const failed = Array.isArray(result?.failedDownloads) ? result.failedDownloads : [];
+    if (failed.length > 0) {
+      retryFailedLabel.textContent = `Retry ${failed.length} failed`;
+      retryFailedBtn.classList.remove('hidden');
+    } else {
+      retryFailedBtn.classList.add('hidden');
+    }
+  } catch (e) {
+    retryFailedBtn.classList.add('hidden');
+  }
 }
 
 function updateProgress(data) {
@@ -244,16 +214,13 @@ function updateProgress(data) {
   if (data.status === 'stopped') return showFinalState(data, 'stopped');
   if (data.status === 'error') return showFinalState(data, 'error');
 
-  startProgressPolling();
   showOnly(progressSection);
   renderProgress(data);
 }
 
 goToDashboard.addEventListener('click', () => {
-  if (tabId) {
-    chrome.tabs.update(tabId, { url: DASHBOARD_URL });
-    window.close();
-  }
+  chrome.tabs.create({ url: DASHBOARD_URL });
+  window.close();
 });
 
 selectAllCb.addEventListener('change', () => {
@@ -276,11 +243,10 @@ startBtn.addEventListener('click', async () => {
   statusText.textContent = 'Starting';
 
   try {
-    await chrome.tabs.sendMessage(tabId, { type: 'START_DOWNLOAD', courses: selected });
-    startProgressPolling();
+    await chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', courses: selected });
   } catch (e) {
     console.error('Failed to start download:', e);
-    messageText.textContent = 'Could not start the crawler. Refresh the page and try again.';
+    messageText.textContent = 'Could not start the run. Check your IIMBx login and try again.';
     showOnly(notOnDashboard);
   }
 });
@@ -289,30 +255,26 @@ restartBtn.addEventListener('click', () => {
   handleStartNewDownload();
 });
 
+retryFailedBtn.addEventListener('click', async () => {
+  retryFailedBtn.disabled = true;
+  showOnly(progressSection);
+  renderProgress({ status: 'downloading', downloaded: 0, total: 0, errors: 0, activeDownloads: 0, percent: 0 });
+  statusText.textContent = 'Retrying';
+  try {
+    await chrome.runtime.sendMessage({ type: 'RETRY_FAILED_DOWNLOADS' });
+  } catch (e) {
+    console.error('Retry failed:', e);
+  } finally {
+    retryFailedBtn.disabled = false;
+  }
+});
+
 stopBtn.addEventListener('click', async () => {
   stopBtn.disabled = true;
-
   try {
     await chrome.runtime.sendMessage({ type: 'STOP_DOWNLOAD' });
   } catch (e) {
-    // Ignore worker stop failures and still try to stop the page loop.
-  }
-
-  try {
-    if (tabId) {
-      await chrome.tabs.sendMessage(tabId, { type: 'STOP_DOWNLOAD' });
-    }
-  } catch (e) {
-    // Ignore if the active tab is no longer a content-script page.
-  }
-
-  await chrome.storage.local.remove('processingState');
-
-  try {
-    const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
-    updateProgress({ ...progress, status: 'stopped' });
-  } catch (e) {
-    updateProgress({ status: 'stopped', downloaded: 0, total: 0, errors: 0, activeDownloads: 0 });
+    // Ignore failures
   } finally {
     stopBtn.disabled = false;
   }
@@ -325,90 +287,51 @@ chrome.runtime.onMessage.addListener(message => {
 });
 
 async function handleStartNewDownload() {
-  stopProgressPolling();
   showOnly(loadingState);
-
   try {
     await chrome.runtime.sendMessage({ type: 'RESET_STATE' });
   } catch (e) {
-    // Ignore background reset failures and continue with local cleanup.
+    // Ignore
   }
-  await chrome.storage.local.remove('processingState');
-
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab) {
-    showOnly(notOnDashboard);
-    return;
-  }
-  tabId = activeTab.id;
-
-  if ((activeTab.url || '').includes('apps.iimbx.edu.in/learner-dashboard')) {
-    await init();
-    return;
-  }
-
-  try {
-    await chrome.tabs.update(tabId, { url: DASHBOARD_URL });
-    await waitForTabUrl(tabId, url => url.includes('apps.iimbx.edu.in/learner-dashboard'));
-    await init();
-  } catch (e) {
-    showOnly(notOnDashboard);
-    messageText.textContent = 'Navigate back to the dashboard and reopen the popup to start another run.';
-  }
+  await init();
 }
 
 async function init() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) {
-    showOnly(notOnDashboard);
-    return;
-  }
-  tabId = tab.id;
-
   try {
     const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
-    if (progress && progress.isRunning) {
-      updateProgress(progress);
-      return;
-    }
-    if (progress && progress.status === 'stopped') {
-      updateProgress(progress);
-      return;
-    }
-    if (progress && progress.status === 'error') {
-      updateProgress(progress);
-      return;
-    }
-    if (progress && progress.status === 'complete' && progress.downloaded > 0) {
-      updateProgress(progress);
-      return;
+    if (progress) {
+      if (progress.isRunning) {
+        updateProgress(progress);
+        return;
+      }
+      if (progress.status === 'stopped' || progress.status === 'error') {
+        updateProgress(progress);
+        return;
+      }
+      if (progress.status === 'complete' && progress.downloaded > 0) {
+        updateProgress(progress);
+        return;
+      }
     }
   } catch (e) {
-    // Background not ready yet, continue with normal init.
-  }
-
-  if (!tab.url || !tab.url.includes('apps.iimbx.edu.in/learner-dashboard')) {
-    showOnly(notOnDashboard);
-    messageText.textContent = 'Open the IIMBx dashboard to see your courses.';
-    return;
+    // Background not ready; fall through
   }
 
   showOnly(loadingState);
 
   try {
-    const response = await chrome.tabs.sendMessage(tabId, { type: 'GET_COURSE_LIST' });
-    if (response && response.courses && response.courses.length > 0) {
+    const response = await chrome.runtime.sendMessage({ type: 'FETCH_DASHBOARD_COURSES' });
+    if (response?.status === 'fetched' && Array.isArray(response.courses) && response.courses.length > 0) {
       renderCourseList(response.courses);
       showOnly(courseSelection);
-    } else {
-      showOnly(notOnDashboard);
-      messageText.textContent = 'No courses found. Make sure your dashboard has enrolled courses.';
+      return;
     }
   } catch (e) {
-    console.error('Failed to get course list:', e);
-    showOnly(notOnDashboard);
-    messageText.textContent = 'Could not communicate with the page. Try refreshing.';
+    console.error('Failed to fetch courses:', e);
   }
+
+  showOnly(notOnDashboard);
+  messageText.textContent = 'Could not load your IIMBx courses. Open the dashboard and log in.';
 }
 
 init();

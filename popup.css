@@ -533,3 +533,7 @@ body {
 #go-to-dashboard {
     margin-top: 6px;
 }
+
+#retry-failed-btn + #restart-btn {
+    margin-top: 8px;
+}

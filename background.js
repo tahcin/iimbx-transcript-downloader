@@ -1,11 +1,14 @@
 // ============================================
 // IIMBx Transcript Downloader — background.js
 // Service worker (MV3)
-// Manages: durable state, download lifecycle,
-//   iframe message relay, retry, progress
+// Owns: API orchestration, parallel fetch pool,
+//       download lifecycle, retry, state, progress.
 // ============================================
 
 'use strict';
+
+const FETCH_CONCURRENCY = 5;
+const OUTLINE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // ---- Default State ----
 
@@ -24,52 +27,47 @@ function createDefaultState() {
         stopRequested: false,
         isCrawling: false,
         isRunning: false,
-        lastError: ''
+        lastError: '',
+        queueInProgress: false,
+        pendingCourses: [],
+        currentCourseIndex: 0
     };
 }
 
 function hydrateState(savedState) {
     const defaults = createDefaultState();
-    const stats = savedState?.stats || {};
-    const cursor = savedState?.cursor || {};
-
     return {
         ...defaults,
         ...savedState,
         queuedUrls: Array.isArray(savedState?.queuedUrls) ? [...savedState.queuedUrls] : [],
         completedUrls: Array.isArray(savedState?.completedUrls) ? [...savedState.completedUrls] : [],
-        stats: {
-            ...defaults.stats,
-            ...stats
-        },
-        cursor: {
-            ...defaults.cursor,
-            ...cursor
-        },
-        activeDownloads: savedState?.activeDownloads ? { ...savedState.activeDownloads } : {}
+        stats: { ...defaults.stats, ...(savedState?.stats || {}) },
+        cursor: { ...defaults.cursor, ...(savedState?.cursor || {}) },
+        activeDownloads: savedState?.activeDownloads ? { ...savedState.activeDownloads } : {},
+        pendingCourses: Array.isArray(savedState?.pendingCourses) ? [...savedState.pendingCourses] : []
     };
 }
 
-// ---- State Management ----
-
 let state = null;
-let stateReady = null; // Promise that resolves when state is loaded
+let stateReady = null;
+let activeRunPromise = null;
 
 async function loadState() {
     const data = await chrome.storage.local.get('downloadState');
     state = hydrateState(data.downloadState);
-}
 
-// Guard: ensures state is loaded before any handler uses it
-async function ensureStateLoaded() {
-    if (state === null) {
-        await stateReady;
+    if (state.queueInProgress && state.pendingCourses.length > 0) {
+        console.log('[BG] Resuming download after service worker restart');
+        state.stopRequested = false;
+        startRun(state.pendingCourses, state.currentCourseIndex);
     }
 }
 
-// Mutation queue: serializes all state writes to prevent interleaving
-let writeQueue = Promise.resolve();
+async function ensureStateLoaded() {
+    if (state === null) await stateReady;
+}
 
+let writeQueue = Promise.resolve();
 function saveState() {
     writeQueue = writeQueue.then(async () => {
         await chrome.storage.local.set({ downloadState: state });
@@ -77,27 +75,24 @@ function saveState() {
     return writeQueue;
 }
 
-// Load on startup, store the promise for ensureStateLoaded
 stateReady = loadState();
 
 // ---- Filename Sanitization ----
 
 function sanitizeFilename(name) {
     return name
-        .replace(/[<>:"/\\|?*]/g, '_')  // Windows illegal chars
-        .replace(/\s+/g, ' ')           // Collapse whitespace
-        .replace(/\.+$/g, '')           // Remove trailing dots
+        .replace(/[<>:"/\\|?*]/g, '_')
+        .replace(/\s+/g, ' ')
+        .replace(/\.+$/g, '')
         .trim()
-        .substring(0, 100);             // Max length
+        .substring(0, 100);
 }
 
 // ---- Progress Broadcasting ----
 
 function buildProgressSnapshot(status) {
     const effectiveStatus = status || (
-        state.stopRequested && !state.isRunning && !state.isCrawling
-            ? 'stopped'
-            : null
+        state.stopRequested && !state.isRunning && !state.isCrawling ? 'stopped' : null
     );
     const isComplete = !state.isRunning
         && !state.isCrawling
@@ -123,9 +118,11 @@ function buildProgressSnapshot(status) {
     };
 }
 
-async function broadcastProgress(status) {
+function broadcastProgress(status) {
     chrome.runtime.sendMessage(buildProgressSnapshot(status)).catch(() => { });
 }
+
+// ---- URL Helpers ----
 
 function extractVerticalBlockPath(value) {
     return value?.match(/block-v1:[^/?#]+type@vertical\+block@[A-Za-z0-9]+/)?.[0] || '';
@@ -134,7 +131,6 @@ function extractVerticalBlockPath(value) {
 function buildXblockUrl(unitUrl) {
     const verticalBlockPath = extractVerticalBlockPath(unitUrl);
     if (!verticalBlockPath) return '';
-
     const url = new URL(`https://iimbx.edu.in/xblock/${verticalBlockPath}`);
     url.searchParams.set('exam_access', '');
     url.searchParams.set('jumpToId', '');
@@ -144,6 +140,8 @@ function buildXblockUrl(unitUrl) {
     url.searchParams.set('view', 'student_view');
     return url.toString();
 }
+
+// ---- API Layer ----
 
 let cachedUsername = null;
 
@@ -195,7 +193,6 @@ function flattenBlocksToUnits(blocksResponse) {
     if (!root) return [];
 
     const units = [];
-
     for (const chapterId of (root.children || [])) {
         const chapter = blocks[chapterId];
         if (!chapter || chapter.type !== 'chapter') continue;
@@ -209,18 +206,15 @@ function flattenBlocksToUnits(blocksResponse) {
             for (const verticalId of (sequential.children || [])) {
                 const vertical = blocks[verticalId];
                 if (!vertical || vertical.type !== 'vertical') continue;
-
                 units.push({
                     chapterTitle,
                     sequentialTitle,
                     unitTitle: vertical.display_name || '',
-                    unitUrl: vertical.student_view_url || vertical.lms_web_url || vertical.id || '',
-                    unitBlockId: vertical.block_id || ''
+                    unitUrl: vertical.student_view_url || vertical.lms_web_url || vertical.id || ''
                 });
             }
         }
     }
-
     return units;
 }
 
@@ -249,16 +243,44 @@ async function fetchDashboardCourses() {
     }
 }
 
-async function fetchCourseOutlineFromApi(courseId) {
-    const username = await fetchUsername(courseId);
-    if (!username) {
-        console.log('[BG] No username available; cannot use blocks API');
-        return null;
+// ---- Outline cache ----
+
+async function getCachedOutline(courseId) {
+    const data = await chrome.storage.local.get('outlineCache');
+    const cache = data.outlineCache || {};
+    const entry = cache[courseId];
+    if (!entry) return null;
+    if (Date.now() - (entry.cachedAt || 0) > OUTLINE_CACHE_TTL_MS) return null;
+    return entry.units;
+}
+
+async function setCachedOutline(courseId, units) {
+    const data = await chrome.storage.local.get('outlineCache');
+    const cache = data.outlineCache || {};
+    cache[courseId] = { units, cachedAt: Date.now() };
+    await chrome.storage.local.set({ outlineCache: cache });
+}
+
+async function clearOutlineCache() {
+    await chrome.storage.local.remove('outlineCache');
+}
+
+async function getCourseOutline(courseId) {
+    const cached = await getCachedOutline(courseId);
+    if (cached) {
+        console.log(`[BG] Using cached outline for ${courseId}: ${cached.length} verticals`);
+        return cached;
     }
+    const username = await fetchUsername(courseId);
+    if (!username) return null;
     const blocks = await fetchCourseBlocks(courseId, username);
     if (!blocks) return null;
-    return flattenBlocksToUnits(blocks);
+    const units = flattenBlocksToUnits(blocks);
+    if (units.length > 0) await setCachedOutline(courseId, units);
+    return units;
 }
+
+// ---- Transcript HTML parsing ----
 
 function decodeHtmlEntities(value) {
     return (value || '')
@@ -334,15 +356,11 @@ function checkAllComplete() {
 
 async function handleDownloadPDF({ url, courseName, sectionName, unitTitle, filename }) {
     if (state.stopRequested) return;
-    // Dedup: skip if already queued or completed
     if (state.queuedUrls.includes(url) || state.completedUrls.includes(url)) return;
     state.queuedUrls.push(url);
 
-    // Sanitize all path components
     const safeCourse = sanitizeFilename(courseName);
     const safeSection = sanitizeFilename(sectionName);
-
-    // Multi-video naming: prefer PDF basename from URL, fallback to unitTitle
     const pdfBasename = filename ? filename.replace('.pdf', '') : unitTitle;
     const safeTitle = sanitizeFilename(pdfBasename);
     const savePath = `Transcripts/${safeCourse}/${safeSection}/${safeTitle}.pdf`;
@@ -350,31 +368,27 @@ async function handleDownloadPDF({ url, courseName, sectionName, unitTitle, file
     state.stats.total++;
     state.isRunning = true;
     await saveState();
-    await broadcastProgress('downloading');
+    broadcastProgress('downloading');
 
     chrome.downloads.download({
-        url: url,
+        url,
         filename: savePath,
         conflictAction: 'uniquify',
         saveAs: false
     }, (downloadId) => {
         if (chrome.runtime.lastError) {
             state.stats.errors++;
-            // Remove from queuedUrls so retry is possible
             state.queuedUrls = state.queuedUrls.filter(u => u !== url);
             console.error('Download error:', chrome.runtime.lastError.message);
             saveState();
             broadcastProgress('error');
         } else if (downloadId) {
-            // Track this download for lifecycle monitoring
             state.activeDownloads[downloadId] = { url, savePath, retryCount: 0 };
             saveState();
             broadcastProgress('downloading');
         }
     });
 }
-
-// ---- Download Lifecycle Tracking ----
 
 chrome.downloads.onChanged.addListener(async (delta) => {
     await ensureStateLoaded();
@@ -390,68 +404,225 @@ chrome.downloads.onChanged.addListener(async (delta) => {
         return;
     }
 
-    if (delta.state) {
-        if (delta.state.current === 'complete') {
-            // Move URL from queued to completed (confirmed on disk)
-            state.completedUrls.push(entry.url);
-            state.stats.completed++;
+    if (!delta.state) return;
+
+    if (delta.state.current === 'complete') {
+        state.completedUrls.push(entry.url);
+        state.stats.completed++;
+        delete state.activeDownloads[delta.id];
+        await saveState();
+        broadcastProgress('downloading');
+        checkAllComplete();
+        return;
+    }
+
+    if (delta.state.current === 'interrupted') {
+        if (entry.retryCount < 1) {
+            state.queuedUrls = state.queuedUrls.filter(u => u !== entry.url);
             delete state.activeDownloads[delta.id];
+            state.pendingRetryCount++;
             await saveState();
-            broadcastProgress('downloading');
-            checkAllComplete();
+            console.log(`Retrying download: ${entry.url}`);
 
-        } else if (delta.state.current === 'interrupted') {
-            if (entry.retryCount < 1) {
-                // RETRY: remove from queued (allows re-queue), re-download after 3s
-                state.queuedUrls = state.queuedUrls.filter(u => u !== entry.url);
-                delete state.activeDownloads[delta.id];
-                state.pendingRetryCount++;
-                await saveState();
-                console.log(`Retrying download: ${entry.url}`);
-
-                setTimeout(() => {
-                    // Re-queue with incremented retry count
-                    state.queuedUrls.push(entry.url);
-                    chrome.downloads.download({
-                        url: entry.url,
-                        filename: entry.savePath,
-                        conflictAction: 'uniquify',
-                        saveAs: false
-                    }, (newDownloadId) => {
-                        if (newDownloadId) {
-                            state.activeDownloads[newDownloadId] = { ...entry, retryCount: entry.retryCount + 1 };
-                        } else {
-                            state.stats.errors++;
-                        }
-                        // Decrement AFTER registration/failure — prevents premature completion
-                        state.pendingRetryCount--;
-                        saveState();
-                        if (!newDownloadId) checkAllComplete();
-                    });
-                }, 3000);
-
-            } else {
-                // Max retries exhausted
-                state.stats.errors++;
-                delete state.activeDownloads[delta.id];
-                // Log failed URL for user review
-                chrome.storage.local.get('failedDownloads').then(data => {
-                    const failedDownloads = data.failedDownloads || [];
-                    failedDownloads.push({ url: entry.url, path: entry.savePath });
-                    chrome.storage.local.set({ failedDownloads });
+            setTimeout(() => {
+                state.queuedUrls.push(entry.url);
+                chrome.downloads.download({
+                    url: entry.url,
+                    filename: entry.savePath,
+                    conflictAction: 'uniquify',
+                    saveAs: false
+                }, (newDownloadId) => {
+                    if (newDownloadId) {
+                        state.activeDownloads[newDownloadId] = { ...entry, retryCount: entry.retryCount + 1 };
+                    } else {
+                        state.stats.errors++;
+                    }
+                    state.pendingRetryCount--;
+                    saveState();
+                    if (!newDownloadId) checkAllComplete();
                 });
-                await saveState();
-                broadcastProgress('error');
-                checkAllComplete();
-            }
+            }, 3000);
+            return;
         }
+
+        state.stats.errors++;
+        delete state.activeDownloads[delta.id];
+        chrome.storage.local.get('failedDownloads').then(data => {
+            const failedDownloads = data.failedDownloads || [];
+            failedDownloads.push({
+                url: entry.url,
+                path: entry.savePath,
+                courseName: entry.courseName || '',
+                sectionName: entry.sectionName || '',
+                unitTitle: entry.unitTitle || ''
+            });
+            chrome.storage.local.set({ failedDownloads });
+        });
+        await saveState();
+        broadcastProgress('error');
+        checkAllComplete();
     }
 });
+
+// ---- Run Orchestration ----
+
+async function processUnit(course, unit) {
+    if (state.stopRequested) return;
+
+    const sectionName = unit.chapterTitle || unit.sequentialTitle || course.name;
+    state.cursor = {
+        courseName: course.name,
+        sectionName,
+        unitTitle: unit.unitTitle || ''
+    };
+    broadcastProgress('downloading');
+
+    const xblockUrl = buildXblockUrl(unit.unitUrl);
+    if (!xblockUrl) return;
+
+    try {
+        const response = await fetch(xblockUrl, { credentials: 'include', cache: 'no-store' });
+        if (!response.ok) {
+            console.warn(`[BG] Unit fetch HTTP ${response.status} for ${unit.unitTitle}`);
+            return;
+        }
+        const html = await response.text();
+        const transcripts = collectTranscriptsFromHtml(html, xblockUrl);
+        for (const t of transcripts) {
+            if (state.stopRequested) return;
+            await handleDownloadPDF({
+                url: t.url,
+                courseName: course.name,
+                sectionName,
+                unitTitle: t.videoTitle || unit.unitTitle,
+                filename: t.filename
+            });
+        }
+    } catch (e) {
+        console.warn(`[BG] Unit fetch failed for ${unit.unitTitle}:`, e);
+    }
+}
+
+async function processOneCourse(course) {
+    if (state.stopRequested) return;
+
+    state.isCrawling = true;
+    state.isRunning = true;
+    state.cursor = { courseName: course.name, sectionName: '', unitTitle: '' };
+    await saveState();
+    broadcastProgress('downloading');
+
+    const units = await getCourseOutline(course.courseId);
+    if (state.stopRequested) return;
+
+    if (!units || units.length === 0) {
+        state.lastError = `Could not load outline for "${course.name}". Refresh your IIMBx login and retry.`;
+        await saveState();
+        broadcastProgress('error');
+        throw new Error('outline_failed');
+    }
+
+    console.log(`[BG] Processing ${course.name}: ${units.length} verticals`);
+
+    let cursor = 0;
+    const worker = async () => {
+        while (cursor < units.length) {
+            if (state.stopRequested) return;
+            const idx = cursor++;
+            await processUnit(course, units[idx]);
+        }
+    };
+
+    const workers = [];
+    for (let i = 0; i < Math.min(FETCH_CONCURRENCY, units.length); i++) {
+        workers.push(worker());
+    }
+    await Promise.all(workers);
+}
+
+async function runDownload(courses, startIdx = 0) {
+    state.queueInProgress = true;
+    state.pendingCourses = courses;
+    state.currentCourseIndex = startIdx;
+    state.stopRequested = false;
+    state.lastError = '';
+    await saveState();
+
+    try {
+        for (let i = startIdx; i < courses.length; i++) {
+            if (state.stopRequested) break;
+            state.currentCourseIndex = i;
+            await saveState();
+            try {
+                await processOneCourse(courses[i]);
+            } catch (e) {
+                console.warn(`[BG] Course ${courses[i].name} aborted:`, e.message);
+                if (e.message === 'outline_failed') break;
+            }
+        }
+    } finally {
+        state.queueInProgress = false;
+        state.isCrawling = false;
+        state.pendingCourses = [];
+        await saveState();
+
+        if (state.stopRequested) {
+            broadcastProgress('stopped');
+        } else if (state.lastError) {
+            broadcastProgress('error');
+        } else if (Object.keys(state.activeDownloads).length > 0 || (state.pendingRetryCount || 0) > 0) {
+            broadcastProgress('crawl_complete');
+        } else {
+            checkAllComplete();
+        }
+    }
+}
+
+function startRun(courses, startIdx = 0) {
+    if (activeRunPromise) {
+        console.log('[BG] Run already in progress; ignoring duplicate start');
+        return activeRunPromise;
+    }
+    activeRunPromise = runDownload(courses, startIdx).finally(() => {
+        activeRunPromise = null;
+    });
+    return activeRunPromise;
+}
+
+// ---- Failed-download retry ----
+
+async function retryFailedDownloads() {
+    const data = await chrome.storage.local.get('failedDownloads');
+    const failed = Array.isArray(data.failedDownloads) ? data.failedDownloads : [];
+    if (failed.length === 0) return 0;
+
+    state.stopRequested = false;
+    state.lastError = '';
+
+    for (const entry of failed) {
+        state.queuedUrls = state.queuedUrls.filter(u => u !== entry.url);
+        state.completedUrls = state.completedUrls.filter(u => u !== entry.url);
+        if (state.stats.errors > 0) state.stats.errors--;
+        if (state.stats.total > 0) state.stats.total--;
+    }
+    await saveState();
+    await chrome.storage.local.remove('failedDownloads');
+
+    for (const entry of failed) {
+        await handleDownloadPDF({
+            url: entry.url,
+            courseName: entry.courseName || '',
+            sectionName: entry.sectionName || '',
+            unitTitle: entry.unitTitle || '',
+            filename: (entry.path || '').split(/[\\/]/).pop() || ''
+        });
+    }
+    return failed.length;
+}
 
 // ---- Message Handler ----
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    // Wrap in async IIFE to use await; return true for async sendResponse
     (async () => {
         await ensureStateLoaded();
 
@@ -466,98 +637,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
         }
 
-        if (message.type === 'FETCH_COURSE_OUTLINE') {
-            const units = await fetchCourseOutlineFromApi(message.courseId);
-            if (Array.isArray(units) && units.length > 0) {
-                const chapterCount = new Set(units.map(u => u.chapterTitle)).size;
-                console.log(`[BG] Course outline: ${units.length} verticals across ${chapterCount} chapters`);
-                sendResponse({ status: 'fetched', units });
-            } else {
-                sendResponse({ status: 'error', units: [] });
-            }
-            return;
-        }
-
-        if (message.type === 'REPORT_ERROR') {
-            console.error(`[BG] Reported error: ${message.reason}`);
-            state.lastError = message.reason || 'Unknown error';
-            state.isRunning = false;
-            state.isCrawling = false;
-            await saveState();
-            await broadcastProgress('error');
-            sendResponse({ status: 'error_recorded' });
-            return;
-        }
-
-        if (message.type === 'FETCH_UNIT_TRANSCRIPTS') {
-            state.cursor = {
-                courseName: message.courseName,
-                sectionName: message.sectionName,
-                unitTitle: message.unitTitle
-            };
-            state.isCrawling = true;
-            state.isRunning = true;
-            state.lastError = '';
-            broadcastProgress('downloading');
-
-            const xblockUrl = buildXblockUrl(message.unitUrl);
-            if (!xblockUrl) {
-                sendResponse({ status: 'error', reason: 'missing_xblock_url', transcripts: [] });
+        if (message.type === 'START_DOWNLOAD') {
+            const courses = Array.isArray(message.courses) ? message.courses : [];
+            if (courses.length === 0) {
+                sendResponse({ status: 'error', reason: 'no_courses' });
                 return;
             }
-
-            try {
-                const response = await fetch(xblockUrl, {
-                    credentials: 'include',
-                    cache: 'no-store'
-                });
-
-                if (!response.ok) {
-                    sendResponse({
-                        status: 'error',
-                        reason: `http_${response.status}`,
-                        transcripts: [],
-                        xblockUrl
-                    });
-                    return;
-                }
-
-                const html = await response.text();
-                const transcripts = collectTranscriptsFromHtml(html, xblockUrl);
-                console.log(`[BG] Fetch scan found ${transcripts.length} transcript(s) for ${message.unitTitle || xblockUrl}`);
-
-                for (const transcript of transcripts) {
-                    await handleDownloadPDF({
-                        url: transcript.url,
-                        courseName: message.courseName,
-                        sectionName: message.sectionName,
-                        unitTitle: transcript.videoTitle || message.unitTitle,
-                        filename: transcript.filename
-                    });
-                }
-
-                sendResponse({ status: 'fetched', transcripts, xblockUrl });
-            } catch (e) {
-                console.warn(`[BG] Fetch scan failed for ${xblockUrl}:`, e);
-                sendResponse({
-                    status: 'error',
-                    reason: e?.message || 'fetch_failed',
-                    transcripts: [],
-                    xblockUrl
-                });
-            }
-        }
-
-        if (message.type === 'GET_PROGRESS') {
-            // Return full ProgressSnapshot
-            sendResponse(buildProgressSnapshot());
-        }
-
-        if (message.type === 'RESET_STATE') {
             state = createDefaultState();
             cachedUsername = null;
+            await chrome.storage.local.remove('failedDownloads');
             await saveState();
-            sendResponse({ status: 'reset' });
+            startRun(courses, 0);
+            sendResponse({ status: 'started' });
+            return;
         }
 
         if (message.type === 'STOP_DOWNLOAD') {
@@ -565,39 +657,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.isCrawling = false;
             state.isRunning = false;
             state.pendingRetryCount = 0;
+            state.queueInProgress = false;
+            state.pendingCourses = [];
             state.cursor = {
                 courseName: state.cursor.courseName || '',
                 sectionName: '',
                 unitTitle: ''
             };
-
             const activeDownloadIds = Object.keys(state.activeDownloads).map(id => Number(id));
             state.activeDownloads = {};
             await saveState();
-
             for (const downloadId of activeDownloadIds) {
-                chrome.downloads.cancel(downloadId, () => {
-                    chrome.runtime.lastError;
-                });
+                chrome.downloads.cancel(downloadId, () => { chrome.runtime.lastError; });
             }
-
             broadcastProgress('stopped');
             sendResponse({ status: 'stopped' });
+            return;
         }
 
-        if (message.type === 'CRAWL_COMPLETE') {
-            state.isCrawling = false;
-            await saveState();
-            if (Object.keys(state.activeDownloads).length > 0 || (state.pendingRetryCount || 0) > 0) {
-                // Crawl done but downloads still draining
-                broadcastProgress('crawl_complete');
-            } else {
-                // Everything done
-                checkAllComplete();
-            }
-            sendResponse({ status: 'crawl_complete_ack' });
+        if (message.type === 'GET_PROGRESS') {
+            sendResponse(buildProgressSnapshot());
+            return;
         }
+
+        if (message.type === 'RESET_STATE') {
+            state = createDefaultState();
+            cachedUsername = null;
+            await chrome.storage.local.remove('failedDownloads');
+            await saveState();
+            sendResponse({ status: 'reset' });
+            return;
+        }
+
+        if (message.type === 'CLEAR_OUTLINE_CACHE') {
+            await clearOutlineCache();
+            sendResponse({ status: 'cleared' });
+            return;
+        }
+
+        if (message.type === 'GET_FAILED_DOWNLOADS') {
+            const data = await chrome.storage.local.get('failedDownloads');
+            sendResponse({ failedDownloads: Array.isArray(data.failedDownloads) ? data.failedDownloads : [] });
+            return;
+        }
+
+        if (message.type === 'RETRY_FAILED_DOWNLOADS') {
+            const count = await retryFailedDownloads();
+            sendResponse({ status: 'retrying', count });
+            return;
+        }
+
+        sendResponse({ status: 'unknown_message' });
     })();
 
-    return true; // keep sendResponse channel open for async
+    return true;
 });
