@@ -648,6 +648,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 unitTitle: message.unitTitle
             };
             rememberScanContext(scanContext);
+            state.cursor = scanContext;
+            state.isCrawling = true;
+            state.isRunning = true;
+            state.lastError = '';
+            broadcastProgress('downloading');
 
             const xblockUrl = buildXblockUrl(message.unitUrl, message.scanId);
             if (!xblockUrl) {
@@ -695,23 +700,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     xblockUrl
                 });
             }
-        }
-
-        if (message.type === 'CURSOR_UPDATE') {
-            state.isCrawling = true;
-            state.isRunning = true;
-            state.cursor = {
-                correlationId: message.correlationId,
-                scanId: message.scanId,
-                expectedBlockId: message.expectedBlockId,
-                courseName: message.courseName,
-                sectionName: message.sectionName,
-                unitTitle: message.unitTitle
-            };
-            rememberScanContext(state.cursor);
-            await saveState();
-            broadcastProgress('downloading');
-            sendResponse({ status: 'cursor_updated' });
         }
 
         if (message.type === 'GET_PROGRESS') {

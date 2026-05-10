@@ -98,8 +98,7 @@ async function resumeProcessing(savedState) {
         if (savedState.state === 'PROCESSING_UNITS'
             && Array.isArray(savedState.units)
             && savedState.units.length > 0) {
-            const startIdx = Number.isInteger(savedState.currentUnitIndex) ? savedState.currentUnitIndex : 0;
-            await processCourseUnits(course, selectedCourses, currentCourseIndex, savedState.units, startIdx);
+            await processCourseUnits(course, selectedCourses, currentCourseIndex, savedState.units);
         } else {
             await loadCourseOutline(course, selectedCourses, currentCourseIndex);
         }
@@ -139,7 +138,7 @@ async function loadCourseOutline(course, allCourses, courseIdx) {
             units: apiResult.units,
             currentUnitIndex: 0
         });
-        await processCourseUnits(course, allCourses, courseIdx, apiResult.units, 0);
+        await processCourseUnits(course, allCourses, courseIdx, apiResult.units);
         return;
     }
 
@@ -151,53 +150,61 @@ async function loadCourseOutline(course, allCourses, courseIdx) {
     await clearProcessingState();
 }
 
-async function processCourseUnits(course, allCourses, courseIdx, units, startIdx) {
-    let unitIdx = Number.isInteger(startIdx) ? startIdx : 0;
+const FETCH_CONCURRENCY = 5;
 
-    while (unitIdx < units.length) {
-        if (shouldStop()) return;
-        const unit = units[unitIdx];
+async function processCourseUnits(course, allCourses, courseIdx, units) {
+    if (units.length === 0) {
+        await moveToNextCourse(allCourses, courseIdx);
+        return;
+    }
 
-        await saveProcessingState({
-            state: 'PROCESSING_UNITS',
-            selectedCourses: allCourses,
-            currentCourseIndex: courseIdx,
-            units,
-            currentUnitIndex: unitIdx
-        });
+    await saveProcessingState({
+        state: 'PROCESSING_UNITS',
+        selectedCourses: allCourses,
+        currentCourseIndex: courseIdx,
+        units,
+        currentUnitIndex: 0
+    });
 
+    let cursor = 0;
+    const fetchUnit = async (unit, idx) => {
         const sectionName = unit.chapterTitle || unit.sequentialTitle || course.name;
         const unitLabel = `${unit.chapterTitle} > ${unit.sequentialTitle} > ${unit.unitTitle}`.trim();
-        console.log(`[IIMBx] Unit ${unitIdx + 1}/${units.length}: ${unitLabel}`);
+        console.log(`[IIMBx] Unit ${idx + 1}/${units.length}: ${unitLabel}`);
 
         const expectedBlockId = unit.unitBlockId || extractVerticalBlockId(unit.unitUrl);
-        const correlationId = `${course.courseId}::${unitIdx}::attempt-1::${Date.now()}`;
-        const scanId = `${course.courseId}::${unitIdx}::scan-1::${Date.now()}`;
+        const correlationId = `${course.courseId}::${idx}::${Date.now()}`;
+        const scanId = `${course.courseId}::${idx}::${Date.now()}`;
 
-        await chrome.runtime.sendMessage({
-            type: 'FETCH_UNIT_TRANSCRIPTS',
-            correlationId,
-            expectedBlockId,
-            scanId,
-            unitUrl: unit.unitUrl,
-            courseName: course.name,
-            sectionName,
-            unitTitle: unit.unitTitle
-        });
+        try {
+            await chrome.runtime.sendMessage({
+                type: 'FETCH_UNIT_TRANSCRIPTS',
+                correlationId,
+                expectedBlockId,
+                scanId,
+                unitUrl: unit.unitUrl,
+                courseName: course.name,
+                sectionName,
+                unitTitle: unit.unitTitle
+            });
+        } catch (e) {
+            console.warn(`[IIMBx] Fetch failed for ${unitLabel}:`, e);
+        }
+    };
 
-        await chrome.runtime.sendMessage({
-            type: 'CURSOR_UPDATE',
-            correlationId,
-            expectedBlockId,
-            scanId,
-            courseName: course.name,
-            sectionName,
-            unitTitle: unit.unitTitle
-        });
+    const worker = async () => {
+        while (cursor < units.length) {
+            if (shouldStop()) return;
+            const idx = cursor++;
+            await fetchUnit(units[idx], idx);
+        }
+    };
 
-        await delay(150);
-        unitIdx += 1;
+    const workers = [];
+    for (let i = 0; i < Math.min(FETCH_CONCURRENCY, units.length); i++) {
+        workers.push(worker());
     }
+    await Promise.all(workers);
 
     if (shouldStop()) return;
     await moveToNextCourse(allCourses, courseIdx);
