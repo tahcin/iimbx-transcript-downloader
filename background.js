@@ -22,6 +22,7 @@ function createDefaultState() {
             sectionName: '',
             unitTitle: ''
         },
+        scanContexts: {},
         activeDownloads: {},
         pendingRetryCount: 0,
         stopRequested: false,
@@ -48,6 +49,7 @@ function hydrateState(savedState) {
             ...defaults.cursor,
             ...cursor
         },
+        scanContexts: savedState?.scanContexts ? { ...savedState.scanContexts } : {},
         activeDownloads: savedState?.activeDownloads ? { ...savedState.activeDownloads } : {}
     };
 }
@@ -126,6 +128,174 @@ function buildProgressSnapshot(status) {
 
 async function broadcastProgress(status) {
     chrome.runtime.sendMessage(buildProgressSnapshot(status)).catch(() => { });
+}
+
+function isScannableIframeUrl(iframeSrc) {
+    return /\/xblock\/block-v1:/i.test(iframeSrc)
+        && /type@vertical\+block@[A-Za-z0-9]+/i.test(iframeSrc);
+}
+
+function extractVerticalBlockPath(value) {
+    return value?.match(/block-v1:[^/?#]+type@vertical\+block@[A-Za-z0-9]+/)?.[0] || '';
+}
+
+function extractSequentialBlockPath(value) {
+    return value?.match(/block-v1:[^/?#]+type@sequential\+block@[A-Za-z0-9]+/)?.[0] || '';
+}
+
+function buildXblockUrl(unitUrl, scanId) {
+    const verticalBlockPath = extractVerticalBlockPath(unitUrl);
+    if (!verticalBlockPath) return '';
+
+    const url = new URL(`https://iimbx.edu.in/xblock/${verticalBlockPath}`);
+    url.searchParams.set('exam_access', '');
+    url.searchParams.set('jumpToId', '');
+    url.searchParams.set('recheck_access', '1');
+    url.searchParams.set('show_bookmark', '0');
+    url.searchParams.set('show_title', '0');
+    url.searchParams.set('view', 'student_view');
+    if (scanId) {
+        url.searchParams.set('codex_scan_id', scanId);
+    }
+    return url.toString();
+}
+
+function buildSequentialXblockUrl(sequentialUrl) {
+    const sequentialBlockPath = extractSequentialBlockPath(sequentialUrl);
+    if (!sequentialBlockPath) return '';
+
+    const url = new URL(`https://iimbx.edu.in/xblock/${sequentialBlockPath}`);
+    url.searchParams.set('exam_access', '');
+    url.searchParams.set('jumpToId', '');
+    url.searchParams.set('recheck_access', '1');
+    url.searchParams.set('show_bookmark', '0');
+    url.searchParams.set('show_title', '0');
+    url.searchParams.set('view', 'student_view');
+    return url.toString();
+}
+
+function collectChildBlocksFromHtml(html, parentBlockPath) {
+    const verticals = new Map();
+    const sequentials = new Map();
+    const source = html || '';
+
+    const verticalRegex = /block-v1:[A-Za-z0-9_+:.-]+type@vertical\+block@[A-Za-z0-9]+/g;
+    let match;
+    while ((match = verticalRegex.exec(source))) {
+        const path = match[0];
+        if (!verticals.has(path)) {
+            verticals.set(path, {
+                url: `https://iimbx.edu.in/xblock/${path}?view=student_view`,
+                blockPath: path
+            });
+        }
+    }
+
+    const sequentialRegex = /block-v1:[A-Za-z0-9_+:.-]+type@sequential\+block@[A-Za-z0-9]+/g;
+    while ((match = sequentialRegex.exec(source))) {
+        const path = match[0];
+        if (parentBlockPath && path === parentBlockPath) continue;
+        if (!sequentials.has(path)) {
+            sequentials.set(path, {
+                url: `https://iimbx.edu.in/xblock/${path}?view=student_view`,
+                blockPath: path
+            });
+        }
+    }
+
+    return {
+        verticals: [...verticals.values()],
+        sequentials: [...sequentials.values()]
+    };
+}
+
+function decodeHtmlEntities(value) {
+    return (value || '')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+}
+
+function stripTags(value) {
+    return decodeHtmlEntities((value || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
+}
+
+function isTranscriptHref(href, text) {
+    return /download transcript/i.test(text)
+        || /\.pdf([?#]|$)/i.test(href)
+        || (/asset-v1:/i.test(href) && /\.pdf/i.test(href));
+}
+
+function collectTranscriptsFromHtml(html, baseUrl) {
+    const transcripts = [];
+    const seen = new Set();
+    const anchorPattern = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+    let match;
+
+    while ((match = anchorPattern.exec(html || ''))) {
+        const attrs = match[1] || '';
+        const hrefMatch = attrs.match(/\bhref\s*=\s*(["'])(.*?)\1/i) || attrs.match(/\bhref\s*=\s*([^\s>]+)/i);
+        const rawHref = hrefMatch?.[2] || hrefMatch?.[1] || '';
+        const href = decodeHtmlEntities(rawHref);
+        const text = stripTags(match[2]);
+
+        if (!href || !isTranscriptHref(href, text)) continue;
+
+        let url;
+        try {
+            url = new URL(href, baseUrl).toString();
+        } catch (e) {
+            continue;
+        }
+
+        if (seen.has(url)) continue;
+        seen.add(url);
+
+        let filename = '';
+        try {
+            const rawFilename = new URL(url).pathname.split('/').pop() || '';
+            filename = decodeURIComponent(rawFilename);
+        } catch (e) {
+            filename = '';
+        }
+
+        transcripts.push({ url, filename, videoTitle: '' });
+    }
+
+    return transcripts;
+}
+
+function resolveScanContext(message) {
+    const messageScanId = message.scanId || '';
+    if (messageScanId && state.scanContexts?.[messageScanId]) {
+        return state.scanContexts[messageScanId];
+    }
+
+    return state.cursor;
+}
+
+function rememberScanContext(context) {
+    if (!context.scanId) return;
+
+    state.scanContexts = {
+        ...(state.scanContexts || {}),
+        [context.scanId]: {
+            correlationId: context.correlationId,
+            scanId: context.scanId,
+            expectedBlockId: context.expectedBlockId,
+            courseName: context.courseName,
+            sectionName: context.sectionName,
+            unitTitle: context.unitTitle,
+            createdAt: Date.now()
+        }
+    };
+
+    const entries = Object.entries(state.scanContexts)
+        .sort((left, right) => (right[1].createdAt || 0) - (left[1].createdAt || 0));
+
+    state.scanContexts = Object.fromEntries(entries.slice(0, 30));
 }
 
 // ---- Completion Check ----
@@ -266,24 +436,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await ensureStateLoaded();
 
         if (message.type === 'TRANSCRIPTS_FOUND') {
+            const scanContext = resolveScanContext(message);
             console.log(`[BG] TRANSCRIPTS_FOUND received:`, {
-                iframeSrc: (message.iframeSrc || '').substring(0, 100),
+                iframeSrc: (message.iframeSrc || '').substring(0, 200),
                 count: message.transcripts?.length,
                 scanId: message.scanId,
-                expectedBlockId: state.cursor.expectedBlockId,
-                correlationId: state.cursor.correlationId,
+                expectedBlockId: scanContext.expectedBlockId,
+                correlationId: scanContext.correlationId,
                 senderTab: sender.tab?.id
             });
 
             const iframeSrc = message.iframeSrc || '';
-            const expectedBlockId = state.cursor.expectedBlockId || '';
-            const correlationId = state.cursor.correlationId || '';
-            const activeScanId = state.cursor.scanId || '';
+            const expectedBlockId = scanContext.expectedBlockId || '';
+            const correlationId = scanContext.correlationId || '';
+            const activeScanId = scanContext.scanId || '';
             const messageScanId = message.scanId || '';
+
+            if (!isScannableIframeUrl(iframeSrc)) {
+                console.warn(`[BG] Dropping TRANSCRIPTS_FOUND from non-xblock iframe: ${iframeSrc.substring(0, 200)}`);
+                sendResponse({ status: 'ignored', reason: 'non_xblock_iframe' });
+                return;
+            }
 
             // Only drop if we have a block ID AND it doesn't match
             if (expectedBlockId && !iframeSrc.includes(expectedBlockId)) {
-                console.warn(`[BG] Dropping stale TRANSCRIPTS_FOUND: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 80)}`);
+                console.warn(`[BG] Dropping stale TRANSCRIPTS_FOUND: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 200)}`);
                 sendResponse({ status: 'ignored', reason: 'stale_iframe' });
                 return;
             }
@@ -308,9 +485,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     for (const transcript of transcripts) {
                         await handleDownloadPDF({
                             url: transcript.url,
-                            courseName: state.cursor.courseName,
-                            sectionName: state.cursor.sectionName,
-                            unitTitle: transcript.videoTitle || state.cursor.unitTitle,
+                            courseName: scanContext.courseName,
+                            sectionName: scanContext.sectionName,
+                            unitTitle: transcript.videoTitle || scanContext.unitTitle,
                             filename: transcript.filename
                         });
                     }
@@ -335,14 +512,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         if (message.type === 'TRANSCRIPT_SCAN_COMPLETE') {
+            const scanContext = resolveScanContext(message);
             const iframeSrc = message.iframeSrc || '';
-            const expectedBlockId = state.cursor.expectedBlockId || '';
-            const correlationId = state.cursor.correlationId || '';
-            const activeScanId = state.cursor.scanId || '';
+            const expectedBlockId = scanContext.expectedBlockId || '';
+            const correlationId = scanContext.correlationId || '';
+            const activeScanId = scanContext.scanId || '';
             const messageScanId = message.scanId || '';
 
+            if (!isScannableIframeUrl(iframeSrc)) {
+                console.warn(`[BG] Dropping TRANSCRIPT_SCAN_COMPLETE from non-xblock iframe: ${iframeSrc.substring(0, 200)}`);
+                sendResponse({ status: 'ignored', reason: 'non_xblock_iframe' });
+                return;
+            }
+
             if (expectedBlockId && !iframeSrc.includes(expectedBlockId)) {
-                console.warn(`[BG] Dropping stale TRANSCRIPT_SCAN_COMPLETE: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 80)}`);
+                console.warn(`[BG] Dropping stale TRANSCRIPT_SCAN_COMPLETE: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 200)}`);
                 sendResponse({ status: 'ignored', reason: 'stale_iframe' });
                 return;
             }
@@ -377,6 +561,123 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'queued' });
         }
 
+        if (message.type === 'REGISTER_SCAN_CONTEXT') {
+            rememberScanContext({
+                correlationId: message.correlationId,
+                scanId: message.scanId,
+                expectedBlockId: message.expectedBlockId,
+                courseName: message.courseName,
+                sectionName: message.sectionName,
+                unitTitle: message.unitTitle
+            });
+            state.isCrawling = true;
+            state.isRunning = true;
+            await saveState();
+            sendResponse({ status: 'scan_context_registered' });
+        }
+
+        if (message.type === 'FETCH_SEQUENTIAL_UNITS') {
+            const sequentialXblockUrl = buildSequentialXblockUrl(message.sequentialUrl);
+            if (!sequentialXblockUrl) {
+                sendResponse({
+                    status: 'error',
+                    reason: 'invalid_sequential_url',
+                    verticals: [],
+                    sequentials: []
+                });
+                return;
+            }
+
+            try {
+                const response = await fetch(sequentialXblockUrl, {
+                    credentials: 'include',
+                    cache: 'no-store'
+                });
+                if (!response.ok) {
+                    sendResponse({
+                        status: 'error',
+                        reason: `http_${response.status}`,
+                        verticals: [],
+                        sequentials: []
+                    });
+                    return;
+                }
+                const html = await response.text();
+                const parentBlockPath = extractSequentialBlockPath(message.sequentialUrl);
+                const { verticals, sequentials } = collectChildBlocksFromHtml(html, parentBlockPath);
+                console.log(`[BG] Sequential outline for ${message.sequentialTitle || parentBlockPath}: ${verticals.length} verticals, ${sequentials.length} child sequentials`);
+                sendResponse({ status: 'fetched', verticals, sequentials });
+            } catch (e) {
+                console.warn(`[BG] FETCH_SEQUENTIAL_UNITS failed:`, e);
+                sendResponse({
+                    status: 'error',
+                    reason: e?.message || 'fetch_failed',
+                    verticals: [],
+                    sequentials: []
+                });
+            }
+            return;
+        }
+
+        if (message.type === 'FETCH_UNIT_TRANSCRIPTS') {
+            const scanContext = {
+                correlationId: message.correlationId,
+                scanId: message.scanId,
+                expectedBlockId: message.expectedBlockId,
+                courseName: message.courseName,
+                sectionName: message.sectionName,
+                unitTitle: message.unitTitle
+            };
+            rememberScanContext(scanContext);
+
+            const xblockUrl = buildXblockUrl(message.unitUrl, message.scanId);
+            if (!xblockUrl) {
+                sendResponse({ status: 'error', reason: 'missing_xblock_url', transcripts: [] });
+                return;
+            }
+
+            try {
+                const response = await fetch(xblockUrl, {
+                    credentials: 'include',
+                    cache: 'no-store'
+                });
+
+                if (!response.ok) {
+                    sendResponse({
+                        status: 'error',
+                        reason: `http_${response.status}`,
+                        transcripts: [],
+                        xblockUrl
+                    });
+                    return;
+                }
+
+                const html = await response.text();
+                const transcripts = collectTranscriptsFromHtml(html, xblockUrl);
+                console.log(`[BG] Fetch scan found ${transcripts.length} transcript(s) for ${message.unitTitle || message.expectedBlockId}`);
+
+                for (const transcript of transcripts) {
+                    await handleDownloadPDF({
+                        url: transcript.url,
+                        courseName: scanContext.courseName,
+                        sectionName: scanContext.sectionName,
+                        unitTitle: transcript.videoTitle || scanContext.unitTitle,
+                        filename: transcript.filename
+                    });
+                }
+
+                sendResponse({ status: 'fetched', transcripts, xblockUrl });
+            } catch (e) {
+                console.warn(`[BG] Fetch scan failed for ${xblockUrl}:`, e);
+                sendResponse({
+                    status: 'error',
+                    reason: e?.message || 'fetch_failed',
+                    transcripts: [],
+                    xblockUrl
+                });
+            }
+        }
+
         if (message.type === 'CURSOR_UPDATE') {
             state.isCrawling = true;
             state.isRunning = true;
@@ -388,6 +689,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sectionName: message.sectionName,
                 unitTitle: message.unitTitle
             };
+            rememberScanContext(state.cursor);
             await saveState();
             broadcastProgress('downloading');
             sendResponse({ status: 'cursor_updated' });
@@ -417,6 +719,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sectionName: '',
                 unitTitle: ''
             };
+            state.scanContexts = {};
 
             const activeDownloadIds = Object.keys(state.activeDownloads).map(id => Number(id));
             state.activeDownloads = {};

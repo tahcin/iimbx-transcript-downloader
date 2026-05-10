@@ -8,8 +8,17 @@
 
 'use strict';
 
+function extractVerticalBlockId(value) {
+    return value?.match(/type@vertical\+block@([A-Za-z0-9]+)/)?.[1] || '';
+}
+
+function isScannableXblockFrame() {
+    return /\/xblock\/block-v1:/i.test(window.location.href)
+        && /type@vertical\+block@[A-Za-z0-9]+/i.test(window.location.href);
+}
+
 // Only act inside iframes, not top-level navigation to iimbx.edu.in
-if (window.self !== window.top) {
+if (window.self !== window.top && isScannableXblockFrame()) {
     console.log('[IIMBx iframe] Script loaded in iframe:', window.location.href.substring(0, 100));
 
     let lastReportedKey = '';
@@ -21,6 +30,7 @@ if (window.self !== window.top) {
     let lastActivityAt = Date.now();
 
     const scanId = new URL(window.location.href).searchParams.get('codex_scan_id') || '';
+    const expectedBlockId = extractVerticalBlockId(window.location.href);
     const SCAN_IDLE_MS = 1500;
     const SCAN_MAX_MS = 15000;
 
@@ -63,6 +73,7 @@ if (window.self !== window.top) {
             type: 'TRANSCRIPTS_FOUND',
             iframeSrc: window.location.href,
             scanId,
+            expectedBlockId,
             transcripts
         }).then(() => {
             console.log('[IIMBx iframe] TRANSCRIPTS_FOUND sent successfully');
@@ -106,6 +117,7 @@ if (window.self !== window.top) {
             type: 'TRANSCRIPT_SCAN_COMPLETE',
             iframeSrc: window.location.href,
             scanId,
+            expectedBlockId,
             transcripts
         }).then(() => {
             console.log('[IIMBx iframe] TRANSCRIPT_SCAN_COMPLETE sent successfully');
@@ -200,5 +212,5 @@ if (window.self !== window.top) {
         maybeCompleteScan(true);
     }, 30000);
 } else {
-    console.log('[IIMBx iframe] Skipping - top-level page');
+    console.log('[IIMBx iframe] Skipping non-xblock frame:', window.location.href.substring(0, 100));
 }
