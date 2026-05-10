@@ -3,63 +3,152 @@
 
 <head>
     <meta charset="UTF-8">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="popup.css">
 </head>
 
 <body>
-    <div class="container">
-        <header>
-            <h1>📄 IIMBx Transcript Downloader</h1>
+    <div class="app">
+        <header class="masthead">
+            <svg class="masthead-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="4.5" y="3" width="15" height="18" stroke="currentColor" stroke-width="1.4" />
+                <line x1="8" y1="8" x2="16" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
+                <line x1="8" y1="12" x2="16" y2="12" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
+                <line x1="8" y1="16" x2="13" y2="16" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
+            </svg>
+            <div class="masthead-text">
+                <div class="masthead-eyebrow">IIMBx</div>
+                <div class="masthead-title">Transcript Downloader</div>
+            </div>
         </header>
 
-        <!-- State 1: Not on dashboard -->
-        <div id="not-on-dashboard" class="hidden">
-            <p class="info-text">Please navigate to your IIMBx dashboard to see your courses.</p>
-            <button id="go-to-dashboard" class="secondary-btn">Go to Dashboard</button>
-        </div>
+        <main class="stage">
+            <!-- State 1: Not on dashboard -->
+            <section id="not-on-dashboard" class="panel hidden">
+                <div class="message">
+                    <svg class="message-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" />
+                        <path d="M12 8v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                        <circle cx="12" cy="16.5" r="0.6" fill="currentColor" />
+                    </svg>
+                    <p id="message-text">Open the IIMBx dashboard to see your courses.</p>
+                </div>
+                <button id="go-to-dashboard" class="btn-ghost">
+                    <span>Open dashboard</span>
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M6 3h7v7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                        <path d="M13 3L4 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    </svg>
+                </button>
+            </section>
 
-        <!-- State 2: Loading -->
-        <div id="loading-state" class="hidden">
-            <div class="spinner"></div>
-            <p class="info-text">Loading courses...</p>
-        </div>
+            <!-- State 2: Loading -->
+            <section id="loading-state" class="panel hidden">
+                <div class="loader">
+                    <svg class="loader-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" opacity="0.18" />
+                        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="1.4"
+                            stroke-linecap="round" />
+                    </svg>
+                    <span>Loading courses</span>
+                </div>
+            </section>
 
-        <!-- State 3: Course list + selection -->
-        <div id="course-selection" class="hidden">
-            <div class="select-all-row">
-                <label class="checkbox-label">
+            <!-- State 3: Course list -->
+            <section id="course-selection" class="panel hidden">
+                <div class="search">
+                    <svg class="search-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4" />
+                        <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    </svg>
+                    <input type="text" id="course-search" placeholder="Search courses" autocomplete="off"
+                        spellcheck="false">
+                </div>
+                <label class="course-row select-all">
                     <input type="checkbox" id="select-all">
-                    <span>Select All</span>
+                    <span class="checkbox" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                            <path d="M3 8l3 3 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                stroke-linejoin="round" />
+                        </svg>
+                    </span>
+                    <span class="course-name">Select all</span>
                 </label>
-            </div>
-            <div id="course-list" class="course-list">
-                <!-- Dynamically populated -->
-            </div>
-            <button id="start-download" class="primary-btn" disabled>🔽 Download Transcripts</button>
-        </div>
+                <div id="course-list" class="course-list"></div>
+                <div id="course-empty" class="course-empty hidden">No courses match</div>
+                <button id="start-download" class="btn-primary" disabled>
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M8 2v8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                        <path d="M4.5 7L8 10.5 11.5 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <path d="M3 13.5h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                    </svg>
+                    <span>Download transcripts</span>
+                </button>
+            </section>
 
-        <!-- State 4: Progress -->
-        <div id="progress-section" class="hidden">
-            <div id="status-text" class="status-text">Initializing...</div>
-            <div class="progress-bar">
-                <div id="progress-fill" class="progress-fill"></div>
-            </div>
-            <div class="progress-details">
-                <div id="current-course" class="detail-line"></div>
-                <div id="current-section" class="detail-line"></div>
-                <div id="current-unit" class="detail-line"></div>
-                <div id="download-count" class="detail-line"></div>
-            </div>
-            <div id="log" class="log-area"></div>
-            <button id="stop-download" class="danger-btn">Stop Download</button>
-        </div>
+            <!-- State 4: Progress -->
+            <section id="progress-section" class="panel hidden">
+                <div class="counter-block">
+                    <div class="counter-stack">
+                        <span id="count-current" class="counter-current">000</span>
+                        <span class="counter-divider">/</span>
+                        <span id="count-total" class="counter-total">000</span>
+                    </div>
+                    <div class="counter-caption">Transcripts downloaded</div>
+                </div>
+                <div class="progress-bar">
+                    <div id="progress-fill" class="progress-fill"></div>
+                </div>
+                <dl class="meta">
+                    <div class="meta-row">
+                        <dt>Course</dt>
+                        <dd id="current-course">—</dd>
+                    </div>
+                    <div class="meta-row">
+                        <dt>Section</dt>
+                        <dd id="current-section">—</dd>
+                    </div>
+                    <div class="meta-row">
+                        <dt>Active</dt>
+                        <dd id="current-unit" class="meta-mono">—</dd>
+                    </div>
+                    <div class="meta-row">
+                        <dt>Status</dt>
+                        <dd id="status-text">Initializing</dd>
+                    </div>
+                </dl>
+                <button id="stop-download" class="btn-ghost">
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <rect x="4.5" y="4.5" width="7" height="7" stroke="currentColor" stroke-width="1.5" />
+                    </svg>
+                    <span>Stop</span>
+                </button>
+            </section>
 
-        <!-- State 5: Complete -->
-        <div id="complete-section" class="hidden">
-            <div class="complete-icon">✅</div>
-            <div id="complete-summary" class="complete-summary"></div>
-            <button id="restart-btn" class="secondary-btn">Start New Download</button>
-        </div>
+            <!-- State 5: Complete -->
+            <section id="complete-section" class="panel hidden">
+                <div id="complete-icon-box" class="complete-mark complete-mark-success" aria-hidden="true"></div>
+                <div id="complete-summary" class="complete-summary"></div>
+                <button id="restart-btn" class="btn-primary">
+                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5"
+                            stroke-linecap="round" />
+                        <path d="M13 8a5 5 0 0 1-8.5 3.5" stroke="currentColor" stroke-width="1.5"
+                            stroke-linecap="round" />
+                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                        <path d="M4.5 14v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                            stroke-linejoin="round" />
+                    </svg>
+                    <span>New download</span>
+                </button>
+            </section>
+        </main>
     </div>
     <script src="popup.js"></script>
 </body>

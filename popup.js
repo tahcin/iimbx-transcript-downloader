@@ -9,6 +9,8 @@ const completeSection = document.getElementById('complete-section');
 const goToDashboard = document.getElementById('go-to-dashboard');
 const selectAllCb = document.getElementById('select-all');
 const courseListDiv = document.getElementById('course-list');
+const courseSearch = document.getElementById('course-search');
+const courseEmpty = document.getElementById('course-empty');
 const startBtn = document.getElementById('start-download');
 const restartBtn = document.getElementById('restart-btn');
 const stopBtn = document.getElementById('stop-download');
@@ -18,11 +20,30 @@ const progressFill = document.getElementById('progress-fill');
 const currentCourse = document.getElementById('current-course');
 const currentSection = document.getElementById('current-section');
 const currentUnit = document.getElementById('current-unit');
-const downloadCount = document.getElementById('download-count');
-const logArea = document.getElementById('log');
+const countCurrent = document.getElementById('count-current');
+const countTotal = document.getElementById('count-total');
 const completeSummary = document.getElementById('complete-summary');
+const completeIconBox = document.getElementById('complete-icon-box');
+const messageText = document.getElementById('message-text');
 
 const DASHBOARD_URL = 'https://apps.iimbx.edu.in/learner-dashboard/';
+const CHECK_SVG = '<svg viewBox="0 0 16 16" fill="none"><path d="M3 8l3 3 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+const COMPLETE_ICON = `<svg viewBox="0 0 24 24" fill="none">
+  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/>
+  <path d="M7.5 12l3 3 6-6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`;
+
+const STOPPED_ICON = `<svg viewBox="0 0 24 24" fill="none">
+  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/>
+  <rect x="9" y="9" width="6" height="6" stroke="currentColor" stroke-width="1.4"/>
+</svg>`;
+
+const ERROR_ICON = `<svg viewBox="0 0 24 24" fill="none">
+  <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.4"/>
+  <path d="M12 7v6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+  <circle cx="12" cy="16.5" r="0.7" fill="currentColor"/>
+</svg>`;
 
 let courses = [];
 let tabId = null;
@@ -40,6 +61,14 @@ function showOnly(section) {
   }
 }
 
+function pad3(n) {
+  return String(Math.max(0, n | 0)).padStart(3, '0');
+}
+
+function setMeta(el, value) {
+  el.textContent = value && String(value).trim() ? value : '—';
+}
+
 function stopProgressPolling() {
   if (progressPollTimer) {
     clearInterval(progressPollTimer);
@@ -49,13 +78,10 @@ function stopProgressPolling() {
 
 function startProgressPolling() {
   if (progressPollTimer) return;
-
   progressPollTimer = setInterval(async () => {
     try {
       const progress = await chrome.runtime.sendMessage({ type: 'GET_PROGRESS' });
-      if (progress) {
-        updateProgress(progress);
-      }
+      if (progress) updateProgress(progress);
     } catch (e) {
       // Background may be temporarily unavailable; next tick will retry.
     }
@@ -72,7 +98,6 @@ function waitForTabUrl(tabIdToWatch, matcher, timeout = 15000) {
     function handleUpdated(updatedTabId, changeInfo, tab) {
       if (updatedTabId !== tabIdToWatch) return;
       if (changeInfo.status !== 'complete') return;
-
       if (matcher(tab.url || '')) {
         clearTimeout(timer);
         chrome.tabs.onUpdated.removeListener(handleUpdated);
@@ -92,16 +117,14 @@ function updateStartButton() {
 function renderCourseList(courseData) {
   courses = courseData;
   courseListDiv.innerHTML = '';
+  courseSearch.value = '';
 
   chrome.storage.local.get('selectedCourseIds', data => {
     const savedIds = new Set(data.selectedCourseIds || []);
 
     courses.forEach(course => {
-      const item = document.createElement('div');
-      item.className = 'course-item';
-
       const label = document.createElement('label');
-      label.className = 'checkbox-label';
+      label.className = 'course-row';
 
       const cb = document.createElement('input');
       cb.type = 'checkbox';
@@ -114,24 +137,50 @@ function renderCourseList(courseData) {
         saveSelectedCourses();
       });
 
-      const span = document.createElement('span');
-      span.textContent = course.name;
-      span.title = course.name;
+      const checkmark = document.createElement('span');
+      checkmark.className = 'checkbox';
+      checkmark.setAttribute('aria-hidden', 'true');
+      checkmark.innerHTML = CHECK_SVG;
+
+      const name = document.createElement('span');
+      name.className = 'course-name';
+      name.textContent = course.name;
+      name.title = course.name;
 
       label.appendChild(cb);
-      label.appendChild(span);
-      item.appendChild(label);
-      courseListDiv.appendChild(item);
+      label.appendChild(checkmark);
+      label.appendChild(name);
+      courseListDiv.appendChild(label);
     });
 
+    applyCourseFilter();
     updateStartButton();
     updateSelectAllState();
   });
 }
 
+function visibleCourseRows() {
+  return Array.from(courseListDiv.querySelectorAll('.course-row'))
+    .filter(row => !row.classList.contains('hidden'));
+}
+
+function applyCourseFilter() {
+  const query = courseSearch.value.trim().toLowerCase();
+  const rows = courseListDiv.querySelectorAll('.course-row');
+  let visible = 0;
+  rows.forEach(row => {
+    const name = row.querySelector('.course-name')?.textContent.toLowerCase() || '';
+    const match = !query || name.includes(query);
+    row.classList.toggle('hidden', !match);
+    if (match) visible++;
+  });
+  courseEmpty.classList.toggle('hidden', visible > 0 || rows.length === 0);
+  updateSelectAllState();
+}
+
 function updateSelectAllState() {
-  const boxes = courseListDiv.querySelectorAll('input[type="checkbox"]');
-  const allChecked = boxes.length > 0 && Array.from(boxes).every(cb => cb.checked);
+  const visibleBoxes = visibleCourseRows().map(row => row.querySelector('input[type="checkbox"]'));
+  const allChecked = visibleBoxes.length > 0 && visibleBoxes.every(cb => cb && cb.checked);
   selectAllCb.checked = allChecked;
 }
 
@@ -141,57 +190,63 @@ function saveSelectedCourses() {
   chrome.storage.local.set({ selectedCourseIds: selected });
 }
 
+function renderProgress(data) {
+  countCurrent.textContent = pad3(data.downloaded || 0);
+  countTotal.textContent = pad3(data.total || 0);
+  progressFill.style.width = `${data.percent || 0}%`;
+  setMeta(currentCourse, data.courseName);
+  setMeta(currentSection, data.sectionName);
+  setMeta(currentUnit, data.unitTitle);
+
+  const baseStatus = {
+    downloading: 'Downloading',
+    crawl_complete: 'Finishing downloads',
+    stopped: 'Stopped',
+    idle: 'Idle'
+  }[data.status] || (data.status ? String(data.status).replace(/_/g, ' ') : 'Working');
+
+  const bits = [baseStatus];
+  if (data.activeDownloads > 0) bits.push(`${data.activeDownloads} in flight`);
+  if (data.errors > 0) bits.push(`${data.errors} ${data.errors === 1 ? 'error' : 'errors'}`);
+  statusText.textContent = bits.join(' · ');
+}
+
+function showFinalState(data, kind) {
+  stopProgressPolling();
+  showOnly(completeSection);
+
+  const iconHtml = kind === 'error' ? ERROR_ICON : (kind === 'stopped' ? STOPPED_ICON : COMPLETE_ICON);
+  completeIconBox.innerHTML = iconHtml;
+  completeIconBox.className = `complete-mark complete-mark-${kind === 'error' ? 'error' : 'success'}`;
+
+  const downloaded = data.downloaded || 0;
+  const errors = data.errors || 0;
+  const errorWord = errors === 1 ? 'error' : 'errors';
+
+  let html;
+  if (kind === 'complete') {
+    html = `<strong>${pad3(downloaded)}</strong> transcripts saved`
+      + (errors > 0 ? `<br>${errors} ${errorWord}` : '')
+      + `<br>Download complete`;
+  } else if (kind === 'stopped') {
+    html = `<strong>${pad3(downloaded)}</strong> transcripts saved`
+      + (errors > 0 ? `<br>${errors} ${errorWord}` : '')
+      + `<br>Stopped`;
+  } else {
+    html = (downloaded > 0 ? `<strong>${pad3(downloaded)}</strong> transcripts saved before error<br>` : '')
+      + (data.errorMessage || 'Unknown error');
+  }
+  completeSummary.innerHTML = html;
+}
+
 function updateProgress(data) {
-  if (data.status === 'complete') {
-    stopProgressPolling();
-    showOnly(completeSection);
-    completeSummary.innerHTML =
-      `<strong>${data.downloaded}</strong> transcripts downloaded` +
-      (data.errors > 0 ? `<br>${data.errors} errors` : '') +
-      '<br>Download complete!';
-    return;
-  }
-
-  if (data.status === 'stopped') {
-    stopProgressPolling();
-    showOnly(completeSection);
-    completeSummary.innerHTML =
-      `<strong>${data.downloaded || 0}</strong> transcripts downloaded` +
-      (data.errors > 0 ? `<br>${data.errors} errors` : '') +
-      '<br>Download stopped.';
-    return;
-  }
-
-  if (data.status === 'error') {
-    stopProgressPolling();
-    showOnly(completeSection);
-    completeSummary.innerHTML =
-      `<strong>${data.downloaded || 0}</strong> transcripts downloaded` +
-      (data.errors > 0 ? `<br>${data.errors} errors` : '') +
-      `<br>${data.errorMessage || 'Error occurred. See console.'}`;
-    return;
-  }
+  if (data.status === 'complete') return showFinalState(data, 'complete');
+  if (data.status === 'stopped') return showFinalState(data, 'stopped');
+  if (data.status === 'error') return showFinalState(data, 'error');
 
   startProgressPolling();
   showOnly(progressSection);
-
-  const statusMap = {
-    downloading: 'Downloading...',
-    crawl_complete: 'Finishing downloads...',
-    stopped: 'Stopped',
-    idle: 'Idle'
-  };
-
-  statusText.textContent = statusMap[data.status] || `${data.status || 'Downloading'}...`;
-  progressFill.style.width = `${data.percent || 0}%`;
-
-  if (data.courseName) currentCourse.innerHTML = `<strong>Course:</strong> ${data.courseName}`;
-  if (data.sectionName) currentSection.innerHTML = `<strong>Section:</strong> ${data.sectionName}`;
-  if (data.unitTitle) currentUnit.innerHTML = `<strong>Unit:</strong> ${data.unitTitle}`;
-
-  downloadCount.innerHTML = `<strong>Downloaded:</strong> ${data.downloaded || 0} / ${data.total || 0} PDFs` +
-    (data.activeDownloads > 0 ? ` (${data.activeDownloads} in flight)` : '') +
-    (data.errors > 0 ? ` | ${data.errors} errors` : '');
+  renderProgress(data);
 }
 
 goToDashboard.addEventListener('click', () => {
@@ -202,37 +257,30 @@ goToDashboard.addEventListener('click', () => {
 });
 
 selectAllCb.addEventListener('change', () => {
-  const boxes = courseListDiv.querySelectorAll('input[type="checkbox"]');
-  boxes.forEach(cb => {
-    cb.checked = selectAllCb.checked;
-  });
+  const visibleBoxes = visibleCourseRows().map(row => row.querySelector('input[type="checkbox"]'));
+  visibleBoxes.forEach(cb => { if (cb) cb.checked = selectAllCb.checked; });
   updateStartButton();
   saveSelectedCourses();
 });
 
+courseSearch.addEventListener('input', applyCourseFilter);
+
 startBtn.addEventListener('click', async () => {
   const selected = Array.from(courseListDiv.querySelectorAll('input[type="checkbox"]:checked'))
-    .map(cb => ({
-      courseId: cb.value,
-      name: cb.dataset.name
-    }));
+    .map(cb => ({ courseId: cb.value, name: cb.dataset.name }));
 
   if (selected.length === 0) return;
 
   showOnly(progressSection);
-  statusText.textContent = 'Starting...';
-  logArea.innerHTML = '';
+  renderProgress({ status: 'downloading', downloaded: 0, total: 0, errors: 0, activeDownloads: 0, percent: 0 });
+  statusText.textContent = 'Starting';
 
   try {
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'START_DOWNLOAD',
-      courses: selected
-    });
+    await chrome.tabs.sendMessage(tabId, { type: 'START_DOWNLOAD', courses: selected });
     startProgressPolling();
   } catch (e) {
     console.error('Failed to start download:', e);
-    document.querySelector('#not-on-dashboard .info-text').textContent =
-      'Could not start the crawler. Refresh the page and try again.';
+    messageText.textContent = 'Could not start the crawler. Refresh the page and try again.';
     showOnly(notOnDashboard);
   }
 });
@@ -279,14 +327,12 @@ chrome.runtime.onMessage.addListener(message => {
 async function handleStartNewDownload() {
   stopProgressPolling();
   showOnly(loadingState);
-  logArea.innerHTML = '';
 
   try {
     await chrome.runtime.sendMessage({ type: 'RESET_STATE' });
   } catch (e) {
     // Ignore background reset failures and continue with local cleanup.
   }
-
   await chrome.storage.local.remove('processingState');
 
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -294,7 +340,6 @@ async function handleStartNewDownload() {
     showOnly(notOnDashboard);
     return;
   }
-
   tabId = activeTab.id;
 
   if ((activeTab.url || '').includes('apps.iimbx.edu.in/learner-dashboard')) {
@@ -305,12 +350,10 @@ async function handleStartNewDownload() {
   try {
     await chrome.tabs.update(tabId, { url: DASHBOARD_URL });
     await waitForTabUrl(tabId, url => url.includes('apps.iimbx.edu.in/learner-dashboard'));
-    await delay(800);
     await init();
   } catch (e) {
     showOnly(notOnDashboard);
-    document.querySelector('#not-on-dashboard .info-text').textContent =
-      'Navigate back to the dashboard and reopen the popup to start another run.';
+    messageText.textContent = 'Navigate back to the dashboard and reopen the popup to start another run.';
   }
 }
 
@@ -332,6 +375,10 @@ async function init() {
       updateProgress(progress);
       return;
     }
+    if (progress && progress.status === 'error') {
+      updateProgress(progress);
+      return;
+    }
     if (progress && progress.status === 'complete' && progress.downloaded > 0) {
       updateProgress(progress);
       return;
@@ -342,6 +389,7 @@ async function init() {
 
   if (!tab.url || !tab.url.includes('apps.iimbx.edu.in/learner-dashboard')) {
     showOnly(notOnDashboard);
+    messageText.textContent = 'Open the IIMBx dashboard to see your courses.';
     return;
   }
 
@@ -354,14 +402,12 @@ async function init() {
       showOnly(courseSelection);
     } else {
       showOnly(notOnDashboard);
-      document.querySelector('#not-on-dashboard .info-text').textContent =
-        'No courses found. Make sure your dashboard has enrolled courses.';
+      messageText.textContent = 'No courses found. Make sure your dashboard has enrolled courses.';
     }
   } catch (e) {
     console.error('Failed to get course list:', e);
     showOnly(notOnDashboard);
-    document.querySelector('#not-on-dashboard .info-text').textContent =
-      'Could not communicate with the page. Try refreshing.';
+    messageText.textContent = 'Could not communicate with the page. Try refreshing.';
   }
 }
 

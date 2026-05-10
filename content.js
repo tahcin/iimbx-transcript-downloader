@@ -44,11 +44,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-function handleGetCourseList(sendResponse) {
-    const links = document.querySelectorAll('a[href*="/learning/course/course-v1:"]');
-    const courseMap = new Map();
+async function handleGetCourseList(sendResponse) {
+    const courseLinkSelector = 'a[href*="/learning/course/course-v1:"]';
 
-    links.forEach(link => {
+    const initialWaitStart = Date.now();
+    while (Date.now() - initialWaitStart < 10000) {
+        if (document.querySelectorAll(courseLinkSelector).length > 0) break;
+        await delay(300);
+    }
+
+    const scroller = document.scrollingElement || document.documentElement;
+    const previousScroll = scroller.scrollTop;
+    let lastCount = -1;
+    for (let i = 0; i < 40; i++) {
+        scroller.scrollTop = scroller.scrollHeight;
+        await delay(500);
+        const count = document.querySelectorAll(courseLinkSelector).length;
+        if (count === lastCount) break;
+        lastCount = count;
+    }
+    scroller.scrollTop = previousScroll;
+
+    const courseMap = new Map();
+    document.querySelectorAll(courseLinkSelector).forEach(link => {
         const name = normalizeWhitespace(link.querySelector('h2')?.textContent || link.textContent);
         const courseId = extractCourseId(link.href);
         if (courseId && name && !courseMap.has(courseId)) {
