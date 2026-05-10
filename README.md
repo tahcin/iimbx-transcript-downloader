@@ -1,181 +1,66 @@
 # IIMBx Transcript Downloader
 
-Chrome/Brave extension for bulk-downloading transcript PDFs from IIMBx courses.
+Chrome / Brave extension that bulk-downloads transcript PDFs from your enrolled IIMBx courses into a tidy folder hierarchy under your `Downloads`.
 
-It is meant for the IIMBx learning flows hosted on:
+## How it works
 
-- `https://apps.iimbx.edu.in/*`
-- `https://iimbx.edu.in/*`
+The extension talks directly to the Open edX JSON APIs that the IIMBx site is built on, so there's no DOM scraping, no page navigation per unit, and no dependence on the course page layout:
 
-The extension crawls a selected course, opens its lecture pages, detects transcript PDF links inside the course content iframe, and downloads those PDFs into a course-organized folder structure under your Downloads folder.
+1. `GET /api/learner_home/init/` — lists your enrolled courses.
+2. `GET /api/courses/v2/blocks/?course_id=…&depth=all` — returns the entire course tree (chapter → sequential → vertical) for each selected course.
+3. `GET /xblock/<vertical-block>?view=student_view` — returns each unit's HTML, which is parsed for transcript PDF anchors.
 
-## What It Is For
+All HTTP work runs in the service worker with your existing iimbx.edu.in session cookies. The dashboard tab only needs to be open so the popup has a target tab and your cookies stay warm; everything is fetched in the background. Up to 5 unit fetches run in parallel.
 
-This extension is designed for IIMBx courses where:
+## What it downloads
 
-- the learner starts from the IIMBx dashboard
-- a course has modules/sections such as `Section 1`, `Module 2`, etc.
-- those contain sequentials like `1.1`, `2.3`, `4.1`
-- those then contain lecture/video units like `1.1.1`, `1.2.2`, etc.
-- video pages expose transcript downloads inside the embedded IIMBx content frame
+Transcript PDFs only, saved as:
 
-It skips obvious non-lecture pages such as:
-
-- discussion forums
-- timed exams / continuous learning assessments
-- feedback/live-session style pages
-
-## What It Downloads
-
-The extension downloads transcript PDFs only.
-
-It does not download:
-
-- videos
-- subtitles from YouTube directly
-- handouts unless they are surfaced as transcript PDF assets
-
-Downloads are grouped under a path like:
-
-`Downloads/Transcripts/<Course Name>/<Section or Module Name>/...`
-
-## Setup
-
-There is no build step. Load it as an unpacked extension.
-
-1. Open Chrome or Brave.
-2. Go to `chrome://extensions` or `brave://extensions`.
-3. Enable `Developer mode`.
-4. Click `Load unpacked`.
-5. Select this folder:
-
-```text
-C:\Users\tahci\desktop\t_d
+```
+Downloads/Transcripts/<Course Name>/<Module / Chapter Name>/<filename>.pdf
 ```
 
-6. Make sure the extension stays enabled.
+Filenames come straight from the asset URL on iimbx, so you get the original IIMBx-curated PDF names.
 
-## Required Browser Settings
+It does **not** download videos, YouTube subtitles, or non-transcript handouts.
 
-For reliable bulk downloading:
+## Installation
 
-1. Open browser download settings.
-2. Disable:
+There's no build step.
 
-```text
-Ask where to save each file before downloading
-```
+1. Clone or download this repo.
+2. Open `chrome://extensions` (or `brave://extensions`).
+3. Toggle **Developer mode** on (top-right).
+4. Click **Load unpacked**.
+5. Select the repo folder.
 
-If this setting stays enabled, the native `Save As` dialog will block the crawl.
+To use the extension, also turn off Chrome / Brave's *"Ask where to save each file before downloading"* setting — otherwise every PDF triggers a Save dialog and the run halts.
 
-## How To Use
+## Usage
 
-1. Log in to IIMBx.
-2. Open the learner dashboard:
+1. Log in to IIMBx in the same browser profile.
+2. Open the learner dashboard: `https://apps.iimbx.edu.in/learner-dashboard/`
+3. Click the extension icon.
+4. The popup lists every enrolled course. Use the search box to filter, click the checkboxes to pick the ones you want, then **Download transcripts**.
+5. Watch the progress in the popup, or background the tab — fetches happen in the service worker so throttling doesn't matter.
 
-```text
-https://apps.iimbx.edu.in/learner-dashboard/
-```
+The popup shows the live download counter, the chapter currently being scanned, the unit a worker is on, and an in-flight count. **Stop** halts the active run. **New download** clears state and re-queries the dashboard.
 
-3. Open the extension popup.
-4. Select one or more courses.
-5. Click `Download Transcripts`.
-6. Leave the course tab open until the run finishes.
+## Permissions
 
-The popup shows:
+- `downloads` — save the PDFs
+- `storage`, `unlimitedStorage` — persist run state across page reloads
+- `activeTab`, `scripting` — communicate with the dashboard tab
+- Host: `https://apps.iimbx.edu.in/*`, `https://iimbx.edu.in/*`
 
-- current course
-- current section/module
-- current unit
-- number of PDFs downloaded
+## Files
 
-You can also use `Stop Download` to halt an active run.
-
-## Supported Course Shapes
-
-The extension is intended to handle both of these broad patterns:
-
-1. Section-based courses
-
-- `Section 1`
-- `1.1`
-- `1.1.1`
-
-2. Module-based courses
-
-- `Module 1`
-- `1.1`
-- `1.1.1`
-
-It works best when the course outline ultimately exposes lecture/video units in the left sidebar and transcript links exist in the IIMBx iframe content.
-
-## Reliability Notes
-
-The current implementation is UI-driven, so these habits help:
-
-- keep the IIMBx course tab open
-- avoid closing or navigating that tab elsewhere during a run
-- switching to other tabs is usually fine
-- keeping the course tab in the foreground is the safest option for long runs
-
-## Troubleshooting
-
-### The popup shows `0/0 PDFs`
-
-Check the page console and look for:
-
-- `Found X units in sidebar`
-- `TRANSCRIPTS_FOUND_RELAY received`
-- `Found X transcript(s), reporting...`
-
-If those appear, transcript detection is working and the problem is usually download handling or state handoff.
-
-### The browser opens `Save As`
-
-Disable:
-
-```text
-Ask where to save each file before downloading
-```
-
-### It gets stuck on non-lecture pages
-
-The crawler is supposed to skip timed exams, discussion forums, assessments, and similar pages. If a new course shape still causes a stall, capture:
-
-- the page URL
-- the popup state
-- page console logs
-
-### It misses part of a course
-
-Some IIMBx courses use slightly different module/section DOM structures. If that happens, inspect:
-
-- course home structure
-- module/sequential expansion behavior
-- sidebar unit rows
-
-## Permissions Used
-
-- `downloads`: save transcript PDFs
-- `storage`: persist progress/state
-- `unlimitedStorage`: keep crawl state reliably
-- `activeTab`: interact with the active IIMBx tab
-- `scripting`: inject/coordinate page-side logic
-
-Host permissions are restricted to:
-
-- `https://apps.iimbx.edu.in/*`
-- `https://iimbx.edu.in/*`
-
-## Project Files
-
-- [manifest.json](C:\Users\tahci\desktop\t_d\manifest.json) extension manifest
-- [popup.html](C:\Users\tahci\desktop\t_d\popup.html) popup UI
-- [popup.js](C:\Users\tahci\desktop\t_d\popup.js) popup logic
-- [background.js](C:\Users\tahci\desktop\t_d\background.js) download/state worker
-- [content.js](C:\Users\tahci\desktop\t_d\content.js) course traversal logic
-- [iframe_content.js](C:\Users\tahci\desktop\t_d\iframe_content.js) transcript detection inside IIMBx iframe
+- `manifest.json` — MV3 manifest
+- `popup.html` / `popup.css` / `popup.js` — popup UI and orchestration
+- `background.js` — service worker: API calls, parallel fetch coordinator, download manager, state
+- `content.js` — minimal content script on the dashboard tab; just brokers messages
+- `icons/` — toolbar icons
 
 ## License
 
-This repository includes an MIT license. See [LICENSE](C:\Users\tahci\desktop\t_d\LICENSE).
+MIT — see [LICENSE](LICENSE).

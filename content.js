@@ -4,10 +4,6 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function extractVerticalBlockId(value) {
-    return value?.match(/type@vertical\+block@([A-Za-z0-9]+)/)?.[1] || '';
-}
-
 let stopRequested = false;
 
 function shouldStop() {
@@ -162,16 +158,9 @@ async function processCourseUnits(course, allCourses, courseIdx, units) {
         const unitLabel = `${unit.chapterTitle} > ${unit.sequentialTitle} > ${unit.unitTitle}`.trim();
         console.log(`[IIMBx] Unit ${idx + 1}/${units.length}: ${unitLabel}`);
 
-        const expectedBlockId = unit.unitBlockId || extractVerticalBlockId(unit.unitUrl);
-        const correlationId = `${course.courseId}::${idx}::${Date.now()}`;
-        const scanId = `${course.courseId}::${idx}::${Date.now()}`;
-
         try {
             await chrome.runtime.sendMessage({
                 type: 'FETCH_UNIT_TRANSCRIPTS',
-                correlationId,
-                expectedBlockId,
-                scanId,
                 unitUrl: unit.unitUrl,
                 courseName: course.name,
                 sectionName,

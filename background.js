@@ -15,14 +15,10 @@ function createDefaultState() {
         completedUrls: [],
         stats: { total: 0, completed: 0, errors: 0 },
         cursor: {
-            correlationId: '',
-            scanId: '',
-            expectedBlockId: '',
             courseName: '',
             sectionName: '',
             unitTitle: ''
         },
-        scanContexts: {},
         activeDownloads: {},
         pendingRetryCount: 0,
         stopRequested: false,
@@ -50,7 +46,6 @@ function hydrateState(savedState) {
             ...defaults.cursor,
             ...cursor
         },
-        scanContexts: savedState?.scanContexts ? { ...savedState.scanContexts } : {},
         activeDownloads: savedState?.activeDownloads ? { ...savedState.activeDownloads } : {}
     };
 }
@@ -132,16 +127,11 @@ async function broadcastProgress(status) {
     chrome.runtime.sendMessage(buildProgressSnapshot(status)).catch(() => { });
 }
 
-function isScannableIframeUrl(iframeSrc) {
-    return /\/xblock\/block-v1:/i.test(iframeSrc)
-        && /type@vertical\+block@[A-Za-z0-9]+/i.test(iframeSrc);
-}
-
 function extractVerticalBlockPath(value) {
     return value?.match(/block-v1:[^/?#]+type@vertical\+block@[A-Za-z0-9]+/)?.[0] || '';
 }
 
-function buildXblockUrl(unitUrl, scanId) {
+function buildXblockUrl(unitUrl) {
     const verticalBlockPath = extractVerticalBlockPath(unitUrl);
     if (!verticalBlockPath) return '';
 
@@ -152,9 +142,6 @@ function buildXblockUrl(unitUrl, scanId) {
     url.searchParams.set('show_bookmark', '0');
     url.searchParams.set('show_title', '0');
     url.searchParams.set('view', 'student_view');
-    if (scanId) {
-        url.searchParams.set('codex_scan_id', scanId);
-    }
     return url.toString();
 }
 
@@ -331,37 +318,6 @@ function collectTranscriptsFromHtml(html, baseUrl) {
     return transcripts;
 }
 
-function resolveScanContext(message) {
-    const messageScanId = message.scanId || '';
-    if (messageScanId && state.scanContexts?.[messageScanId]) {
-        return state.scanContexts[messageScanId];
-    }
-
-    return state.cursor;
-}
-
-function rememberScanContext(context) {
-    if (!context.scanId) return;
-
-    state.scanContexts = {
-        ...(state.scanContexts || {}),
-        [context.scanId]: {
-            correlationId: context.correlationId,
-            scanId: context.scanId,
-            expectedBlockId: context.expectedBlockId,
-            courseName: context.courseName,
-            sectionName: context.sectionName,
-            unitTitle: context.unitTitle,
-            createdAt: Date.now()
-        }
-    };
-
-    const entries = Object.entries(state.scanContexts)
-        .sort((left, right) => (right[1].createdAt || 0) - (left[1].createdAt || 0));
-
-    state.scanContexts = Object.fromEntries(entries.slice(0, 30));
-}
-
 // ---- Completion Check ----
 
 function checkAllComplete() {
@@ -499,147 +455,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
         await ensureStateLoaded();
 
-        if (message.type === 'TRANSCRIPTS_FOUND') {
-            const scanContext = resolveScanContext(message);
-            console.log(`[BG] TRANSCRIPTS_FOUND received:`, {
-                iframeSrc: (message.iframeSrc || '').substring(0, 200),
-                count: message.transcripts?.length,
-                scanId: message.scanId,
-                expectedBlockId: scanContext.expectedBlockId,
-                correlationId: scanContext.correlationId,
-                senderTab: sender.tab?.id
-            });
-
-            const iframeSrc = message.iframeSrc || '';
-            const expectedBlockId = scanContext.expectedBlockId || '';
-            const correlationId = scanContext.correlationId || '';
-            const activeScanId = scanContext.scanId || '';
-            const messageScanId = message.scanId || '';
-
-            if (!isScannableIframeUrl(iframeSrc)) {
-                console.warn(`[BG] Dropping TRANSCRIPTS_FOUND from non-xblock iframe: ${iframeSrc.substring(0, 200)}`);
-                sendResponse({ status: 'ignored', reason: 'non_xblock_iframe' });
-                return;
-            }
-
-            // Only drop if we have a block ID AND it doesn't match
-            if (expectedBlockId && !iframeSrc.includes(expectedBlockId)) {
-                console.warn(`[BG] Dropping stale TRANSCRIPTS_FOUND: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 200)}`);
-                sendResponse({ status: 'ignored', reason: 'stale_iframe' });
-                return;
-            }
-
-            if (activeScanId && (!messageScanId || messageScanId !== activeScanId)) {
-                console.warn(`[BG] Dropping stale TRANSCRIPTS_FOUND: expected scanId ${activeScanId}, got ${messageScanId || 'missing'}`);
-                sendResponse({ status: 'ignored', reason: 'stale_scan' });
-                return;
-            }
-
-            // Relay to the tab that contains the iframe
-            if (sender.tab) {
-                if (!correlationId) {
-                    console.warn('[BG] Dropping TRANSCRIPTS_FOUND because no active correlation is set');
-                    sendResponse({ status: 'ignored', reason: 'missing_correlation' });
-                    return;
-                }
-
-                const transcripts = Array.isArray(message.transcripts) ? message.transcripts : [];
-                if (transcripts.length > 0) {
-                    console.log(`[BG] Queueing ${transcripts.length} transcript download(s) from iframe relay`);
-                    for (const transcript of transcripts) {
-                        await handleDownloadPDF({
-                            url: transcript.url,
-                            courseName: scanContext.courseName,
-                            sectionName: scanContext.sectionName,
-                            unitTitle: transcript.videoTitle || scanContext.unitTitle,
-                            filename: transcript.filename
-                        });
-                    }
-                }
-
-                console.log(`[BG] Relaying TRANSCRIPTS_FOUND_RELAY to tab ${sender.tab.id} with correlationId=${correlationId}`);
-                await chrome.tabs.sendMessage(sender.tab.id, {
-                    type: 'TRANSCRIPTS_FOUND_RELAY',
-                    correlationId,
-                    scanId: activeScanId,
-                    iframeSrc: message.iframeSrc,
-                    transcripts: message.transcripts
-                }).catch(e => {
-                    console.error('[BG] Failed to relay TRANSCRIPTS_FOUND:', e);
-                    return null;
-                });
-                sendResponse({ status: 'relayed' });
-            } else {
-                console.error('[BG] No sender.tab — cannot relay TRANSCRIPTS_FOUND');
-                sendResponse({ status: 'ignored', reason: 'missing_sender_tab' });
-            }
-        }
-
-        if (message.type === 'TRANSCRIPT_SCAN_COMPLETE') {
-            const scanContext = resolveScanContext(message);
-            const iframeSrc = message.iframeSrc || '';
-            const expectedBlockId = scanContext.expectedBlockId || '';
-            const correlationId = scanContext.correlationId || '';
-            const activeScanId = scanContext.scanId || '';
-            const messageScanId = message.scanId || '';
-
-            if (!isScannableIframeUrl(iframeSrc)) {
-                console.warn(`[BG] Dropping TRANSCRIPT_SCAN_COMPLETE from non-xblock iframe: ${iframeSrc.substring(0, 200)}`);
-                sendResponse({ status: 'ignored', reason: 'non_xblock_iframe' });
-                return;
-            }
-
-            if (expectedBlockId && !iframeSrc.includes(expectedBlockId)) {
-                console.warn(`[BG] Dropping stale TRANSCRIPT_SCAN_COMPLETE: expected ${expectedBlockId}, src=${iframeSrc.substring(0, 200)}`);
-                sendResponse({ status: 'ignored', reason: 'stale_iframe' });
-                return;
-            }
-
-            if (activeScanId && (!messageScanId || messageScanId !== activeScanId)) {
-                console.warn(`[BG] Dropping stale TRANSCRIPT_SCAN_COMPLETE: expected scanId ${activeScanId}, got ${messageScanId || 'missing'}`);
-                sendResponse({ status: 'ignored', reason: 'stale_scan' });
-                return;
-            }
-
-            if (!sender.tab || !correlationId) {
-                sendResponse({ status: 'ignored', reason: 'missing_context' });
-                return;
-            }
-
-            await chrome.tabs.sendMessage(sender.tab.id, {
-                type: 'TRANSCRIPT_SCAN_COMPLETE_RELAY',
-                correlationId,
-                scanId: activeScanId,
-                iframeSrc,
-                transcripts: Array.isArray(message.transcripts) ? message.transcripts : []
-            }).catch(e => {
-                console.error('[BG] Failed to relay TRANSCRIPT_SCAN_COMPLETE:', e);
-                return null;
-            });
-
-            sendResponse({ status: 'relayed' });
-        }
-
-        if (message.type === 'DOWNLOAD_PDF') {
-            await handleDownloadPDF(message);
-            sendResponse({ status: 'queued' });
-        }
-
-        if (message.type === 'REGISTER_SCAN_CONTEXT') {
-            rememberScanContext({
-                correlationId: message.correlationId,
-                scanId: message.scanId,
-                expectedBlockId: message.expectedBlockId,
-                courseName: message.courseName,
-                sectionName: message.sectionName,
-                unitTitle: message.unitTitle
-            });
-            state.isCrawling = true;
-            state.isRunning = true;
-            await saveState();
-            sendResponse({ status: 'scan_context_registered' });
-        }
-
         if (message.type === 'FETCH_DASHBOARD_COURSES') {
             const courses = await fetchDashboardCourses();
             if (Array.isArray(courses) && courses.length > 0) {
@@ -675,22 +490,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         if (message.type === 'FETCH_UNIT_TRANSCRIPTS') {
-            const scanContext = {
-                correlationId: message.correlationId,
-                scanId: message.scanId,
-                expectedBlockId: message.expectedBlockId,
+            state.cursor = {
                 courseName: message.courseName,
                 sectionName: message.sectionName,
                 unitTitle: message.unitTitle
             };
-            rememberScanContext(scanContext);
-            state.cursor = scanContext;
             state.isCrawling = true;
             state.isRunning = true;
             state.lastError = '';
             broadcastProgress('downloading');
 
-            const xblockUrl = buildXblockUrl(message.unitUrl, message.scanId);
+            const xblockUrl = buildXblockUrl(message.unitUrl);
             if (!xblockUrl) {
                 sendResponse({ status: 'error', reason: 'missing_xblock_url', transcripts: [] });
                 return;
@@ -714,14 +524,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
                 const html = await response.text();
                 const transcripts = collectTranscriptsFromHtml(html, xblockUrl);
-                console.log(`[BG] Fetch scan found ${transcripts.length} transcript(s) for ${message.unitTitle || message.expectedBlockId}`);
+                console.log(`[BG] Fetch scan found ${transcripts.length} transcript(s) for ${message.unitTitle || xblockUrl}`);
 
                 for (const transcript of transcripts) {
                     await handleDownloadPDF({
                         url: transcript.url,
-                        courseName: scanContext.courseName,
-                        sectionName: scanContext.sectionName,
-                        unitTitle: transcript.videoTitle || scanContext.unitTitle,
+                        courseName: message.courseName,
+                        sectionName: message.sectionName,
+                        unitTitle: transcript.videoTitle || message.unitTitle,
                         filename: transcript.filename
                     });
                 }
@@ -756,14 +566,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.isRunning = false;
             state.pendingRetryCount = 0;
             state.cursor = {
-                correlationId: '',
-                scanId: '',
-                expectedBlockId: '',
                 courseName: state.cursor.courseName || '',
                 sectionName: '',
                 unitTitle: ''
             };
-            state.scanContexts = {};
 
             const activeDownloadIds = Object.keys(state.activeDownloads).map(id => Number(id));
             state.activeDownloads = {};
