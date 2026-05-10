@@ -237,6 +237,31 @@ function flattenBlocksToUnits(blocksResponse) {
     return units;
 }
 
+async function fetchDashboardCourses() {
+    try {
+        const response = await fetch('https://iimbx.edu.in/api/learner_home/init/', {
+            credentials: 'include',
+            cache: 'no-store'
+        });
+        if (!response.ok) {
+            console.warn(`[BG] learner_home/init/ HTTP ${response.status}`);
+            return null;
+        }
+        const data = await response.json();
+        const entries = Array.isArray(data?.courses) ? data.courses : [];
+        return entries
+            .map(entry => ({
+                courseId: entry?.courseRun?.courseId || '',
+                name: entry?.course?.courseName || '',
+                isArchived: !!entry?.courseRun?.isArchived
+            }))
+            .filter(c => c.courseId && c.name);
+    } catch (e) {
+        console.warn('[BG] fetchDashboardCourses failed:', e);
+        return null;
+    }
+}
+
 async function fetchCourseOutlineFromApi(courseId) {
     const username = await fetchUsername(courseId);
     if (!username) {
@@ -613,6 +638,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             state.isRunning = true;
             await saveState();
             sendResponse({ status: 'scan_context_registered' });
+        }
+
+        if (message.type === 'FETCH_DASHBOARD_COURSES') {
+            const courses = await fetchDashboardCourses();
+            if (Array.isArray(courses) && courses.length > 0) {
+                console.log(`[BG] Dashboard: ${courses.length} courses`);
+                sendResponse({ status: 'fetched', courses });
+            } else {
+                sendResponse({ status: 'error', courses: [] });
+            }
+            return;
         }
 
         if (message.type === 'FETCH_COURSE_OUTLINE') {

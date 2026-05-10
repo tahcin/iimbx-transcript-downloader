@@ -4,14 +4,6 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function normalizeWhitespace(text) {
-    return (text || '').replace(/\s+/g, ' ').trim();
-}
-
-function extractCourseId(value) {
-    return value?.match(/course-v1:[^/?#]+/)?.[0] || '';
-}
-
 function extractVerticalBlockId(value) {
     return value?.match(/type@vertical\+block@([A-Za-z0-9]+)/)?.[1] || '';
 }
@@ -45,36 +37,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function handleGetCourseList(sendResponse) {
-    const courseLinkSelector = 'a[href*="/learning/course/course-v1:"]';
-
-    const initialWaitStart = Date.now();
-    while (Date.now() - initialWaitStart < 10000) {
-        if (document.querySelectorAll(courseLinkSelector).length > 0) break;
-        await delay(300);
-    }
-
-    const scroller = document.scrollingElement || document.documentElement;
-    const previousScroll = scroller.scrollTop;
-    let lastCount = -1;
-    for (let i = 0; i < 40; i++) {
-        scroller.scrollTop = scroller.scrollHeight;
-        await delay(500);
-        const count = document.querySelectorAll(courseLinkSelector).length;
-        if (count === lastCount) break;
-        lastCount = count;
-    }
-    scroller.scrollTop = previousScroll;
-
-    const courseMap = new Map();
-    document.querySelectorAll(courseLinkSelector).forEach(link => {
-        const name = normalizeWhitespace(link.querySelector('h2')?.textContent || link.textContent);
-        const courseId = extractCourseId(link.href);
-        if (courseId && name && !courseMap.has(courseId)) {
-            courseMap.set(courseId, { name, courseId });
+    try {
+        const result = await chrome.runtime.sendMessage({ type: 'FETCH_DASHBOARD_COURSES' });
+        if (result?.status === 'fetched' && Array.isArray(result.courses) && result.courses.length > 0) {
+            sendResponse({ courses: result.courses });
+            return;
         }
-    });
-
-    sendResponse({ courses: Array.from(courseMap.values()) });
+    } catch (e) {
+        console.warn('[IIMBx] Failed to fetch dashboard courses:', e);
+    }
+    sendResponse({ courses: [] });
 }
 
 async function handleStartDownload(courses) {
