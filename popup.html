@@ -38,10 +38,14 @@
                     <p id="message-text">Open the IIMBx dashboard to see your courses.</p>
                 </div>
                 <button id="go-to-dashboard" class="btn-ghost">
-                    <span>Open dashboard</span>
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <span id="go-to-dashboard-label">Open dashboard</span>
+                    <svg id="go-to-dashboard-icon-external" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                         <path d="M6 3h7v7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
                         <path d="M13 3L4 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    </svg>
+                    <svg id="go-to-dashboard-icon-retry" class="hidden" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
                 </button>
             </section>
@@ -56,6 +60,22 @@
                     </svg>
                     <span>Loading courses</span>
                 </div>
+            </section>
+
+            <!-- State 2b: Waiting for sign-in -->
+            <section id="waiting-for-login" class="panel hidden">
+                <div class="loader">
+                    <svg class="loader-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" opacity="0.18" />
+                        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="1.4"
+                            stroke-linecap="round" />
+                    </svg>
+                    <span>Waiting for sign-in</span>
+                </div>
+                <p class="waiting-hint">This window may close — that's fine. Click the extension icon again after you sign in.</p>
+                <button id="waiting-retry" class="btn-ghost">
+                    <span>Try now</span>
+                </button>
             </section>
 
             <!-- State 3: Course list -->

@@ -224,22 +224,31 @@ async function fetchDashboardCourses() {
             credentials: 'include',
             cache: 'no-store'
         });
+        if (response.status === 401 || response.status === 403) {
+            return { ok: false, reason: 'not_logged_in' };
+        }
+        if (response.status >= 500) {
+            return { ok: false, reason: 'network_error' };
+        }
         if (!response.ok) {
             console.warn(`[BG] learner_home/init/ HTTP ${response.status}`);
-            return null;
+            return { ok: false, reason: 'unknown' };
         }
         const data = await response.json();
-        const entries = Array.isArray(data?.courses) ? data.courses : [];
-        return entries
+        const entries = Array.isArray(data?.courses) ? data.courses : null;
+        if (!entries) return { ok: false, reason: 'not_logged_in' };
+        const courses = entries
             .map(entry => ({
                 courseId: entry?.courseRun?.courseId || '',
                 name: entry?.course?.courseName || '',
                 isArchived: !!entry?.courseRun?.isArchived
             }))
             .filter(c => c.courseId && c.name);
+        if (courses.length === 0) return { ok: false, reason: 'not_logged_in' };
+        return { ok: true, courses };
     } catch (e) {
         console.warn('[BG] fetchDashboardCourses failed:', e);
-        return null;
+        return { ok: false, reason: 'network_error' };
     }
 }
 
@@ -627,12 +636,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await ensureStateLoaded();
 
         if (message.type === 'FETCH_DASHBOARD_COURSES') {
-            const courses = await fetchDashboardCourses();
-            if (Array.isArray(courses) && courses.length > 0) {
-                console.log(`[BG] Dashboard: ${courses.length} courses`);
-                sendResponse({ status: 'fetched', courses });
+            const result = await fetchDashboardCourses();
+            if (result.ok) {
+                console.log(`[BG] Dashboard: ${result.courses.length} courses`);
+                sendResponse({ status: 'fetched', courses: result.courses });
             } else {
-                sendResponse({ status: 'error', courses: [] });
+                sendResponse({ status: 'error', reason: result.reason });
             }
             return;
         }

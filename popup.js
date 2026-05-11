@@ -2,11 +2,16 @@
 
 const notOnDashboard = document.getElementById('not-on-dashboard');
 const loadingState = document.getElementById('loading-state');
+const waitingForLogin = document.getElementById('waiting-for-login');
 const courseSelection = document.getElementById('course-selection');
 const progressSection = document.getElementById('progress-section');
 const completeSection = document.getElementById('complete-section');
 
 const goToDashboard = document.getElementById('go-to-dashboard');
+const goToDashboardLabel = document.getElementById('go-to-dashboard-label');
+const goToDashboardIconExternal = document.getElementById('go-to-dashboard-icon-external');
+const goToDashboardIconRetry = document.getElementById('go-to-dashboard-icon-retry');
+const waitingRetry = document.getElementById('waiting-retry');
 const selectAllCb = document.getElementById('select-all');
 const courseListDiv = document.getElementById('course-list');
 const courseSearch = document.getElementById('course-search');
@@ -48,11 +53,68 @@ const ERROR_ICON = `<svg viewBox="0 0 24 24" fill="none">
 </svg>`;
 
 let courses = [];
+let waitingPollTimer = null;
+let lastErrorReason = 'unknown';
+
+const ERROR_COPY = {
+  not_logged_in: {
+    message: "You're not signed in to IIMBx. Sign in to see your courses.",
+    button: 'Open IIMBx',
+    icon: 'external'
+  },
+  network_error: {
+    message: "Couldn't reach IIMBx. Check your connection and try again.",
+    button: 'Retry',
+    icon: 'retry'
+  },
+  unknown: {
+    message: 'Something went wrong loading your courses.',
+    button: 'Retry',
+    icon: 'retry'
+  }
+};
+
+function stopWaitingPoll() {
+  if (waitingPollTimer !== null) {
+    clearInterval(waitingPollTimer);
+    waitingPollTimer = null;
+  }
+}
 
 function showOnly(section) {
-  [notOnDashboard, loadingState, courseSelection, progressSection, completeSection]
+  [notOnDashboard, loadingState, waitingForLogin, courseSelection, progressSection, completeSection]
     .forEach(el => el.classList.add('hidden'));
+  if (section !== waitingForLogin) stopWaitingPoll();
   if (section) section.classList.remove('hidden');
+}
+
+function showErrorState(reason) {
+  const copy = ERROR_COPY[reason] || ERROR_COPY.unknown;
+  lastErrorReason = reason in ERROR_COPY ? reason : 'unknown';
+  messageText.textContent = copy.message;
+  goToDashboardLabel.textContent = copy.button;
+  goToDashboardIconExternal.classList.toggle('hidden', copy.icon !== 'external');
+  goToDashboardIconRetry.classList.toggle('hidden', copy.icon !== 'retry');
+  showOnly(notOnDashboard);
+}
+
+async function pollLoginOnce() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'FETCH_DASHBOARD_COURSES' });
+    if (response?.status === 'fetched' && Array.isArray(response.courses) && response.courses.length > 0) {
+      stopWaitingPoll();
+      renderCourseList(response.courses);
+      showOnly(courseSelection);
+    }
+  } catch (e) {
+    // Background not ready or transient error; keep polling
+  }
+}
+
+function enterWaitingState() {
+  stopWaitingPoll();
+  showOnly(waitingForLogin);
+  waitingPollTimer = setInterval(pollLoginOnce, 3000);
 }
 
 function pad3(n) {
@@ -219,9 +281,19 @@ function updateProgress(data) {
 }
 
 goToDashboard.addEventListener('click', () => {
-  chrome.tabs.create({ url: DASHBOARD_URL });
-  window.close();
+  if (lastErrorReason === 'not_logged_in') {
+    chrome.tabs.create({ url: DASHBOARD_URL });
+    enterWaitingState();
+  } else {
+    init();
+  }
 });
+
+waitingRetry.addEventListener('click', () => {
+  pollLoginOnce();
+});
+
+window.addEventListener('unload', stopWaitingPoll);
 
 selectAllCb.addEventListener('change', () => {
   const visibleBoxes = visibleCourseRows().map(row => row.querySelector('input[type="checkbox"]'));
@@ -246,8 +318,8 @@ startBtn.addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: 'START_DOWNLOAD', courses: selected });
   } catch (e) {
     console.error('Failed to start download:', e);
+    showErrorState('unknown');
     messageText.textContent = 'Could not start the run. Check your IIMBx login and try again.';
-    showOnly(notOnDashboard);
   }
 });
 
@@ -326,12 +398,11 @@ async function init() {
       showOnly(courseSelection);
       return;
     }
+    showErrorState(response?.reason || 'unknown');
   } catch (e) {
     console.error('Failed to fetch courses:', e);
+    showErrorState('unknown');
   }
-
-  showOnly(notOnDashboard);
-  messageText.textContent = 'Could not load your IIMBx courses. Open the dashboard and log in.';
 }
 
 init();
