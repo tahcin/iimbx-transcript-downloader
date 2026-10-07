@@ -3,182 +3,168 @@
 
 <head>
     <meta charset="UTF-8">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap"
-        rel="stylesheet">
+    <link rel="stylesheet" href="fonts.css">
     <link rel="stylesheet" href="popup.css">
 </head>
 
 <body>
     <div class="app">
         <header class="masthead">
-            <svg class="masthead-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <rect x="4.5" y="3" width="15" height="18" stroke="currentColor" stroke-width="1.4" />
-                <line x1="8" y1="8" x2="16" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
-                <line x1="8" y1="12" x2="16" y2="12" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
-                <line x1="8" y1="16" x2="13" y2="16" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" />
-            </svg>
-            <div class="masthead-text">
-                <div class="masthead-eyebrow">IIMBx</div>
-                <div class="masthead-title">Transcript Downloader</div>
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="brand-name"><em>IIMBx</em>Transcripts</span>
             </div>
+            <div id="step" class="step" aria-hidden="true"></div>
         </header>
 
         <main class="stage">
-            <!-- State 1: Not on dashboard -->
+            <!-- Signed out / couldn't load -->
             <section id="not-on-dashboard" class="panel hidden">
                 <div class="message">
-                    <svg class="message-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" />
-                        <path d="M12 8v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                        <circle cx="12" cy="16.5" r="0.6" fill="currentColor" />
-                    </svg>
+                    <span class="kicker">Can't load courses</span>
+                    <h1 class="message-title">One moment, <em>not quite there.</em></h1>
                     <p id="message-text">Open the IIMBx dashboard to see your courses.</p>
                 </div>
-                <button id="go-to-dashboard" class="btn-ghost">
+                <button id="go-to-dashboard" class="btn-primary">
                     <span id="go-to-dashboard-label">Open dashboard</span>
-                    <svg id="go-to-dashboard-icon-external" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M6 3h7v7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                        <path d="M13 3L4 12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    <svg id="go-to-dashboard-icon-external" class="arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M5.5 4h6.5v6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                        <path d="M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
                     </svg>
                     <svg id="go-to-dashboard-icon-retry" class="hidden" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
                 </button>
             </section>
 
-            <!-- State 2: Loading -->
+            <!-- Loading -->
             <section id="loading-state" class="panel hidden">
                 <div class="loader">
-                    <svg class="loader-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" opacity="0.18" />
-                        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="1.4"
-                            stroke-linecap="round" />
-                    </svg>
-                    <span>Loading courses</span>
+                    <span class="loader-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                    <span class="kicker">Loading your courses</span>
                 </div>
             </section>
 
-            <!-- State 2b: Waiting for sign-in -->
+            <!-- Waiting for sign-in -->
             <section id="waiting-for-login" class="panel hidden">
                 <div class="loader">
-                    <svg class="loader-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.4" opacity="0.18" />
-                        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="1.4"
-                            stroke-linecap="round" />
-                    </svg>
-                    <span>Waiting for sign-in</span>
+                    <span class="loader-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                    <span class="kicker">Waiting for sign-in</span>
                 </div>
-                <p class="waiting-hint">This window may close — that's fine. Click the extension icon again after you sign in.</p>
-                <button id="waiting-retry" class="btn-ghost">
-                    <span>Try now</span>
-                </button>
+                <p class="waiting-hint">This popup may close while you sign in. That's fine, just click the extension icon again afterwards.</p>
+                <button id="waiting-retry" class="btn-ghost">Check again</button>
             </section>
 
-            <!-- State 3: Course list -->
+            <!-- Course list -->
             <section id="course-selection" class="panel hidden">
-                <div class="search">
+                <label class="search">
                     <svg class="search-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4" />
-                        <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" />
+                        <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
                     </svg>
-                    <input type="text" id="course-search" placeholder="Search courses" autocomplete="off"
-                        spellcheck="false">
-                </div>
-                <label class="course-row select-all">
-                    <input type="checkbox" id="select-all">
-                    <span class="checkbox" aria-hidden="true">
-                        <svg viewBox="0 0 16 16" fill="none">
-                            <path d="M3 8l3 3 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                                stroke-linejoin="round" />
-                        </svg>
-                    </span>
-                    <span class="course-name">Select all</span>
+                    <input type="text" id="course-search" placeholder="Search courses" autocomplete="off" spellcheck="false">
+                    <kbd>/</kbd>
                 </label>
+                <div class="list-head">
+                    <span id="course-meta" class="kicker">Courses</span>
+                    <label class="select-all">
+                        <input type="checkbox" id="select-all">
+                        <span class="sa-select">Select all</span>
+                        <span class="sa-clear">Clear all</span>
+                    </label>
+                </div>
                 <div id="course-list" class="course-list"></div>
-                <div id="course-empty" class="course-empty hidden">No courses match</div>
+                <div id="course-empty" class="course-empty hidden">Nothing matches that.</div>
+                <div id="folder-strip" class="folder-strip" data-state="checking">
+                    <span id="folder-strip-icon" class="folder-strip-icon" aria-hidden="true"></span>
+                    <div class="folder-strip-text" aria-live="polite">
+                        <div id="folder-strip-title" class="folder-strip-title">Transcripts folder</div>
+                        <div id="folder-strip-sub" class="folder-strip-sub">Looking for saved transcripts…</div>
+                    </div>
+                    <button id="folder-strip-action" class="folder-strip-action hidden"></button>
+                </div>
                 <button id="start-download" class="btn-primary" disabled>
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M8 2v8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-                        <path d="M4.5 7L8 10.5 11.5 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                            stroke-linejoin="round" />
-                        <path d="M3 13.5h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                    <span id="start-label">Select a course</span>
+                    <svg class="arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
-                    <span>Download transcripts</span>
                 </button>
             </section>
 
-            <!-- State 4: Progress -->
+            <!-- Progress -->
             <section id="progress-section" class="panel hidden">
-                <div class="counter-block">
-                    <div class="counter-stack">
-                        <span id="count-current" class="counter-current">000</span>
-                        <span class="counter-divider">/</span>
-                        <span id="count-total" class="counter-total">000</span>
-                    </div>
-                    <div class="counter-caption">Transcripts downloaded</div>
+                <div class="run-status kicker" aria-live="polite">
+                    <span class="pulse" aria-hidden="true"></span>
+                    <span id="status-text">Starting</span>
                 </div>
-                <div class="progress-bar">
-                    <div id="progress-fill" class="progress-fill"></div>
+                <div class="counter">
+                    <span id="count-current" class="counter-current">0</span>
+                    <span class="counter-of">of <span id="count-total">0</span></span>
                 </div>
+                <div id="counter-caption" class="counter-caption">transcripts downloaded</div>
+                <div id="ledger" class="ledger" aria-hidden="true"></div>
+                <div id="legend" class="legend"></div>
                 <dl class="meta">
                     <div class="meta-row">
                         <dt>Course</dt>
-                        <dd id="current-course">—</dd>
+                        <dd id="current-course"></dd>
                     </div>
                     <div class="meta-row">
                         <dt>Section</dt>
-                        <dd id="current-section">—</dd>
+                        <dd id="current-section"></dd>
                     </div>
                     <div class="meta-row">
-                        <dt>Active</dt>
-                        <dd id="current-unit" class="meta-mono">—</dd>
-                    </div>
-                    <div class="meta-row">
-                        <dt>Status</dt>
-                        <dd id="status-text">Initializing</dd>
+                        <dt>Now</dt>
+                        <dd id="current-unit" class="meta-mono"></dd>
                     </div>
                 </dl>
                 <button id="stop-download" class="btn-ghost">
                     <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <rect x="4.5" y="4.5" width="7" height="7" stroke="currentColor" stroke-width="1.5" />
+                        <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.5" />
                     </svg>
                     <span>Stop</span>
                 </button>
             </section>
 
-            <!-- State 5: Complete -->
+            <!-- Done / stopped / error -->
             <section id="complete-section" class="panel hidden">
-                <div id="complete-icon-box" class="complete-mark complete-mark-success" aria-hidden="true"></div>
+                <div id="complete-icon-box" class="complete-mark kicker"></div>
+                <h1 id="complete-title" class="complete-title"></h1>
                 <div id="complete-summary" class="complete-summary"></div>
+                <dl id="complete-stats" class="stats">
+                    <div class="stat" data-s="saved">
+                        <dt><i></i>Saved</dt>
+                        <dd id="stat-saved">0</dd>
+                    </div>
+                    <div class="stat" data-s="skipped">
+                        <dt><i></i>Skipped</dt>
+                        <dd id="stat-skipped">0</dd>
+                    </div>
+                    <div class="stat" data-s="failed">
+                        <dt><i></i>Failed</dt>
+                        <dd id="stat-failed">0</dd>
+                    </div>
+                </dl>
+                <div id="complete-ledger" class="ledger complete-ledger" aria-hidden="true"></div>
+                <p id="complete-hint" class="complete-hint hidden">
+                    Want the next run to skip these?
+                    <button id="complete-connect" class="text-link">Connect your Transcripts folder</button>
+                </p>
                 <button id="retry-failed-btn" class="btn-primary hidden">
                     <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5"
-                            stroke-linecap="round" />
-                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                            stroke-linejoin="round" />
+                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
                     <span id="retry-failed-label">Retry failed</span>
                 </button>
                 <button id="restart-btn" class="btn-ghost">
-                    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M3 8a5 5 0 0 1 8.5-3.5" stroke="currentColor" stroke-width="1.5"
-                            stroke-linecap="round" />
-                        <path d="M13 8a5 5 0 0 1-8.5 3.5" stroke="currentColor" stroke-width="1.5"
-                            stroke-linecap="round" />
-                        <path d="M11.5 2v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                            stroke-linejoin="round" />
-                        <path d="M4.5 14v-3h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                            stroke-linejoin="round" />
-                    </svg>
                     <span>New download</span>
                 </button>
             </section>
         </main>
     </div>
+    <script src="shared.js"></script>
     <script src="popup.js"></script>
 </body>
 
