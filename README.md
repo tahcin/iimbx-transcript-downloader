@@ -12,7 +12,7 @@ The extension talks directly to the Open edX JSON APIs that the IIMBx site is bu
 
 Everything runs in the service worker using your existing iimbx.edu.in session cookies. There is no content script and no dashboard tab requirement — open the popup from any tab. Up to 5 unit fetches run in parallel; downloads are managed by Chrome's download manager.
 
-If the service worker is evicted mid-run, it picks back up where it left off the next time the popup opens (URL-level dedup keeps already-downloaded files from being re-fetched).
+If the service worker is evicted mid-run, it picks back up where it left off the next time the popup opens. Transcripts already fetched in that run aren't fetched again.
 
 ## What it downloads
 
@@ -25,6 +25,26 @@ Downloads/Transcripts/<Course Name>/<Module / Chapter Name>/<filename>.pdf
 Filenames come straight from the asset URL on iimbx, so you get the original IIMBx-curated PDF names.
 
 It does **not** download videos, YouTube subtitles, or non-transcript handouts.
+
+## Skipping transcripts you already have
+
+Connect your `Downloads/Transcripts` folder once and every later run skips the transcripts already in it:
+
+1. In the popup, click **Connect** on the folder bar under the course list. A small setup window opens.
+2. Click **Choose folder**, pick the `Transcripts` folder itself (Chrome won't let extensions open all of Downloads), and allow Chrome to let the extension view files.
+
+Once connected, each course shows how many transcripts are already saved, the progress screen shows a **Skipped** count, and a run with nothing new ends with **All caught up**.
+
+How matching works:
+
+- Access is read-only. The extension only lists PDF names and never changes the folder.
+- A transcript counts as saved if a PDF with the same name is anywhere inside its course folder, so moving files between section folders is fine. Other files you add are ignored.
+- Chrome's `name (1).pdf` copies count as the original.
+- The browser only keeps folder access while the setup window is open, so the result of each check is saved. Runs use that list plus every transcript downloaded since, and the folder bar shows when it was last checked. Click **Rescan** after deleting or moving transcripts. (In Chrome, choosing *Allow on every visit* lets the popup read the folder live instead.)
+
+**Brave** ships with folder access switched off. The folder bar shows **Enable**, which walks you through turning on `brave://flags/#file-system-access-api` and relaunching.
+
+Without a connected folder, everything downloads again but replaces the existing file instead of saving a `(1)` copy. The setup window is also available as the extension's **Options** page.
 
 ## Installation
 
@@ -45,7 +65,7 @@ To use the extension, also turn off Chrome / Brave's *"Ask where to save each fi
 3. The popup lists every enrolled course. Use the search box to filter, click the checkboxes to pick the ones you want, then **Download transcripts**.
 4. Close the popup if you want — the run continues in the background.
 
-The popup shows the live download counter, the chapter currently being scanned, the unit a worker is on, and an in-flight count. **Stop** halts the active run. If any downloads fail after the auto-retry, **Retry failed** appears on the completion screen. **New download** clears state and re-queries the dashboard.
+While a run is going, the popup shows a live counter and a ledger with one square per transcript: saved, skipped, in flight, queued or failed. Below it are the course, section and file being worked on. **Stop** halts the active run. If any downloads fail after the auto-retry, **Retry failed** appears on the completion screen. **New download** clears state and re-queries the dashboard.
 
 ## Permissions
 
@@ -56,7 +76,10 @@ The popup shows the live download counter, the chapter currently being scanned, 
 ## Files
 
 - `manifest.json` — MV3 manifest
-- `popup.html` / `popup.css` / `popup.js` — popup UI
+- `popup.html` / `popup.css` / `popup.js`: popup UI (`popup.css` also styles the setup window)
+- `fonts.css` / `fonts/`: bundled Geist, Geist Mono and Instrument Serif (SIL Open Font License), so the popup renders instantly and offline
+- `folder.html` / `folder.js`: Transcripts folder setup window (also the options page)
+- `shared.js`: filename rules, the saved folder handle, folder scanning and the ledger renderer, shared by the popup, setup page and service worker
 - `background.js` — service worker: API calls, parallel fetch coordinator, download manager, state, retry
 - `icons/` — toolbar icons
 
