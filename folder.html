@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>Transcripts folder</title>
+    <link rel="stylesheet" href="fonts.css">
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body class="page">
+    <div class="app">
+        <header class="masthead">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="brand-name"><em>IIMBx</em>Transcripts</span>
+            </div>
+            <div class="step" aria-hidden="true"><b>Folder</b></div>
+        </header>
+
+        <main class="stage">
+            <div id="setup-error" class="setup-notice hidden" role="alert"></div>
+
+            <!-- Loading -->
+            <section id="panel-loading" class="panel">
+                <div class="loader">
+                    <span class="loader-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                    <span id="loading-label" class="kicker">Checking folder</span>
+                </div>
+            </section>
+
+            <!-- Pick a folder -->
+            <section id="panel-intro" class="panel hidden">
+                <span class="kicker">Skip what you have</span>
+                <h1 class="setup-title">Connect your <em>Transcripts</em> folder.</h1>
+                <p class="setup-lede">
+                    Before each run the extension looks in this folder and skips any transcript you
+                    already have. It can only read the folder, never change or delete anything.
+                </p>
+                <div id="intro-missing" class="setup-notice hidden">
+                    The folder you connected before can't be found. It may have been moved or renamed.
+                    Choose it again below.
+                </div>
+                <div class="path-chip">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M3.5 6.5h6l2 2h9v10h-17z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+                    </svg>
+                    <span>Downloads</span><span class="sep">/</span><strong>Transcripts</strong>
+                </div>
+                <ol class="steps">
+                    <li><span>Click <strong>Choose folder</strong> below.</span></li>
+                    <li><span>Open Downloads and select <strong>Transcripts</strong> itself, not Downloads.</span></li>
+                    <li><span>When the browser asks, allow it to <strong>view files</strong>.</span></li>
+                </ol>
+                <button id="choose-folder" class="btn-primary">
+                    <span>Choose folder</span>
+                    <svg class="arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                </button>
+                <p class="setup-note">
+                    No Transcripts folder yet? Run your first download, then come back.
+                    Until then, re-downloads replace existing files instead of duplicating them.
+                </p>
+            </section>
+
+            <!-- Access lapsed -->
+            <section id="panel-reconnect" class="panel hidden">
+                <span class="kicker">Rescan</span>
+                <h1 class="setup-title">What's in the <em>folder now?</em></h1>
+                <p class="setup-lede">
+                    Allow access so the extension can see which transcripts are there right now.
+                    The browser only keeps access while this window is open, so the result is saved
+                    for your next runs.
+                </p>
+                <div class="path-chip">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M3.5 6.5h6l2 2h9v10h-17z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+                    </svg>
+                    <strong id="reconnect-name">Transcripts</strong>
+                </div>
+                <div class="setup-info">
+                    If the browser offers <strong>Allow on every visit</strong>, pick it and the folder is
+                    checked automatically each time.
+                </div>
+                <button id="allow-access" class="btn-primary">
+                    <span>Allow and rescan</span>
+                    <svg class="arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                </button>
+                <button id="reconnect-choose" class="btn-ghost">Choose a different folder</button>
+                <div class="btn-link-row">
+                    <button id="reconnect-disconnect" class="text-link">Disconnect folder</button>
+                </div>
+            </section>
+
+            <!-- Connected -->
+            <section id="panel-connected" class="panel hidden">
+                <span class="kicker">Connected · <span id="connected-name">Transcripts</span></span>
+                <div class="found">
+                    <span id="found-count" class="found-count">0</span>
+                    <span id="found-label" class="found-label">transcripts found</span>
+                </div>
+                <p id="found-detail" class="found-detail"></p>
+                <div id="found-ledger" class="ledger found-ledger" aria-hidden="true"></div>
+                <div id="connected-note" class="setup-info hidden"></div>
+                <div id="connected-warning" class="setup-notice hidden">
+                    No transcripts here. The extension saves them to <strong>Downloads/Transcripts</strong>.
+                    If that's a different folder, choose it instead.
+                </div>
+                <button id="done" class="btn-primary">
+                    <span>Done</span>
+                    <svg class="arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                </button>
+                <button id="connected-choose" class="btn-ghost">Choose a different folder</button>
+                <div class="btn-link-row">
+                    <button id="connected-disconnect" class="text-link">Disconnect folder</button>
+                </div>
+            </section>
+
+            <!-- Brave: folder access switched off -->
+            <section id="panel-brave" class="panel hidden">
+                <span class="kicker">One setting</span>
+                <h1 class="setup-title">Turn on folder access <em>in Brave.</em></h1>
+                <p class="setup-lede">
+                    Brave switches folder access off by default, so the extension can't see which
+                    transcripts you already have. One setting fixes it.
+                </p>
+                <ol class="steps">
+                    <li><span>Click <strong>Open Brave settings</strong> below.</span></li>
+                    <li><span>Set <strong>File System Access API</strong> to <strong>Enabled</strong>.</span></li>
+                    <li><span>Click <strong>Relaunch</strong>, then open the extension and click <strong>Connect</strong>.</span></li>
+                </ol>
+                <button id="open-flags" class="btn-primary">
+                    <span>Open Brave settings</span>
+                    <svg class="arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M5.5 4h6.5v6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                        <path d="M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                    </svg>
+                </button>
+                <button id="brave-close" class="btn-ghost">Not now</button>
+                <p id="flags-fallback" class="setup-note hidden">
+                    Brave blocked that. Paste this into the address bar instead (it's been copied):<br>
+                    <code>brave://flags/#file-system-access-api</code>
+                </p>
+                <p class="setup-note">Until then, re-downloads replace existing files instead of duplicating them.</p>
+            </section>
+
+            <!-- Browser can't do folder access -->
+            <section id="panel-unsupported" class="panel hidden">
+                <div class="message">
+                    <span class="kicker">Not available</span>
+                    <h1 class="message-title">This browser <em>can't read folders.</em></h1>
+                    <p>So saved transcripts can't be skipped. Re-downloads replace existing files instead of
+                        duplicating them.</p>
+                </div>
+                <button id="unsupported-close" class="btn-ghost">Close</button>
+            </section>
+        </main>
+    </div>
+    <script src="shared.js"></script>
+    <script src="folder.js"></script>
+</body>
+
+</html>

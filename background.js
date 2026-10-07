@@ -7,6 +7,8 @@
 
 'use strict';
 
+importScripts('shared.js');
+
 const FETCH_CONCURRENCY = 5;
 const OUTLINE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -16,7 +18,8 @@ function createDefaultState() {
     return {
         queuedUrls: [],
         completedUrls: [],
-        stats: { total: 0, completed: 0, errors: 0 },
+        claimedPaths: [],
+        stats: { total: 0, completed: 0, errors: 0, skipped: 0 },
         cursor: {
             courseName: '',
             sectionName: '',
@@ -30,7 +33,8 @@ function createDefaultState() {
         lastError: '',
         queueInProgress: false,
         pendingCourses: [],
-        currentCourseIndex: 0
+        currentCourseIndex: 0,
+        folderChecked: false
     };
 }
 
@@ -41,6 +45,7 @@ function hydrateState(savedState) {
         ...savedState,
         queuedUrls: Array.isArray(savedState?.queuedUrls) ? [...savedState.queuedUrls] : [],
         completedUrls: Array.isArray(savedState?.completedUrls) ? [...savedState.completedUrls] : [],
+        claimedPaths: Array.isArray(savedState?.claimedPaths) ? [...savedState.claimedPaths] : [],
         stats: { ...defaults.stats, ...(savedState?.stats || {}) },
         cursor: { ...defaults.cursor, ...(savedState?.cursor || {}) },
         activeDownloads: savedState?.activeDownloads ? { ...savedState.activeDownloads } : {},
@@ -50,11 +55,24 @@ function hydrateState(savedState) {
 
 let state = null;
 let stateReady = null;
-let activeRunPromise = null;
+// { state, promise } for the crawl in progress. Each run is tied to the state object it
+// started with; a reset or new run swaps `state`, which cancels the old run (see isCancelled).
+let activeRun = null;
+// Transcripts already in the connected folder when the run started (transcriptKey values).
+// Stored apart from downloadState so the per-download state writes stay small.
+let existingKeys = new Set();
 
 async function loadState() {
-    const data = await chrome.storage.local.get('downloadState');
+    const data = await chrome.storage.local.get(['downloadState', 'existingFiles']);
     state = hydrateState(data.downloadState);
+    existingKeys = new Set(Array.isArray(data.existingFiles) ? data.existingFiles : []);
+
+    // Retry timers don't survive a service worker restart; count those downloads as failed
+    // so the run can still finish.
+    if (state.pendingRetryCount > 0) {
+        state.stats.errors += state.pendingRetryCount;
+        state.pendingRetryCount = 0;
+    }
 
     if (state.queueInProgress && state.pendingCourses.length > 0) {
         console.log('[BG] Resuming download after service worker restart');
@@ -67,38 +85,49 @@ async function ensureStateLoaded() {
     if (state === null) await stateReady;
 }
 
+// Writes are serialized and coalesced: while one is queued, later calls share it, and it
+// writes whatever `state` holds when it runs.
 let writeQueue = Promise.resolve();
+let writePending = false;
 function saveState() {
-    writeQueue = writeQueue.then(async () => {
-        await chrome.storage.local.set({ downloadState: state });
-    });
+    if (!writePending) {
+        writePending = true;
+        writeQueue = writeQueue.then(async () => {
+            writePending = false;
+            await chrome.storage.local.set({ downloadState: state });
+        }).catch(e => console.warn('[BG] Saving state failed:', e));
+    }
     return writeQueue;
+}
+
+function isCancelled(runState) {
+    return runState !== state || runState.stopRequested;
+}
+
+// Stops whatever the current state is doing before it is replaced.
+function abandonCurrentRun() {
+    if (!state) return;
+    state.stopRequested = true;
+    for (const id of Object.keys(state.activeDownloads)) {
+        chrome.downloads.cancel(Number(id), () => { chrome.runtime.lastError; });
+    }
+    state.activeDownloads = {};
 }
 
 stateReady = loadState();
 
-// ---- Filename Sanitization ----
-
-function sanitizeFilename(name) {
-    return name
-        .replace(/[<>:"/\\|?*]/g, '_')
-        .replace(/\s+/g, ' ')
-        .replace(/\.+$/g, '')
-        .trim()
-        .substring(0, 100);
-}
-
 // ---- Progress Broadcasting ----
 
 function buildProgressSnapshot(status) {
-    const effectiveStatus = status || (
-        state.stopRequested && !state.isRunning && !state.isCrawling ? 'stopped' : null
-    );
+    const idle = !state.isRunning && !state.isCrawling;
+    const effectiveStatus = status
+        || (state.stopRequested && idle ? 'stopped' : null)
+        || (state.lastError && idle ? 'error' : null);
     const isComplete = !state.isRunning
         && !state.isCrawling
         && Object.keys(state.activeDownloads).length === 0
         && (state.pendingRetryCount || 0) === 0
-        && state.stats.total > 0
+        && (state.stats.total > 0 || state.stats.skipped > 0)
         && (state.stats.completed + state.stats.errors) >= state.stats.total;
 
     return {
@@ -111,6 +140,8 @@ function buildProgressSnapshot(status) {
         downloaded: state.stats.completed,
         total: state.stats.total,
         errors: state.stats.errors,
+        skipped: state.stats.skipped,
+        folderChecked: state.folderChecked,
         activeDownloads: Object.keys(state.activeDownloads).length,
         percent: state.stats.total > 0
             ? Math.round((state.stats.completed / state.stats.total) * 100) : 0,
@@ -366,37 +397,121 @@ function checkAllComplete() {
 async function handleDownloadPDF({ url, courseName, sectionName, unitTitle, filename }) {
     if (state.stopRequested) return;
     if (state.queuedUrls.includes(url) || state.completedUrls.includes(url)) return;
-    state.queuedUrls.push(url);
 
     const safeCourse = sanitizeFilename(courseName);
     const safeSection = sanitizeFilename(sectionName);
-    const pdfBasename = filename ? filename.replace('.pdf', '') : unitTitle;
+    const pdfBasename = filename ? filename.replace(/\.pdf$/i, '') : unitTitle;
     const safeTitle = sanitizeFilename(pdfBasename);
     const savePath = `Transcripts/${safeCourse}/${safeSection}/${safeTitle}.pdf`;
 
+    const key = transcriptKey(safeCourse, `${safeTitle}.pdf`);
+    if (existingKeys.has(key)) {
+        state.completedUrls.push(url);
+        state.stats.skipped++;
+        saveState();
+        broadcastProgress('downloading');
+        return;
+    }
+
+    state.queuedUrls.push(url);
+    // Replace a same-named file left by an earlier run instead of saving "name (1).pdf",
+    // unless another transcript in this run already claimed that path.
+    const conflictAction = state.claimedPaths.includes(savePath) ? 'uniquify' : 'overwrite';
+    state.claimedPaths.push(savePath);
+
     state.stats.total++;
     state.isRunning = true;
-    await saveState();
+    saveState();
     broadcastProgress('downloading');
 
-    chrome.downloads.download({
-        url,
-        filename: savePath,
-        conflictAction: 'uniquify',
-        saveAs: false
-    }, (downloadId) => {
-        if (chrome.runtime.lastError) {
-            state.stats.errors++;
-            state.queuedUrls = state.queuedUrls.filter(u => u !== url);
-            console.error('Download error:', chrome.runtime.lastError.message);
+    // Awaited so the crawl only finishes once every download is registered;
+    // otherwise the run could be reported complete while downloads are still starting.
+    const runState = state;
+    let downloadId;
+    try {
+        downloadId = await chrome.downloads.download({ url, filename: savePath, conflictAction, saveAs: false });
+    } catch (e) {
+        console.error('Download error:', e?.message || e);
+        if (runState !== state) return;
+        state.stats.errors++;
+        state.queuedUrls = state.queuedUrls.filter(u => u !== url);
+        recordFailedDownload({ url, savePath, courseName, sectionName, unitTitle });
+        saveState();
+        broadcastProgress('downloading');
+        checkAllComplete();
+        return;
+    }
+
+    if (isCancelled(runState)) {
+        chrome.downloads.cancel(downloadId, () => { chrome.runtime.lastError; });
+        return;
+    }
+    state.activeDownloads[downloadId] = {
+        url, savePath, key, conflictAction, courseName, sectionName, unitTitle, retryCount: 0
+    };
+    saveState();
+}
+
+// Keeps the connected folder's snapshot (see shared.js) in step with what this
+// extension has saved into it since the last scan.
+let snapshotQueue = Promise.resolve();
+function recordSavedTranscript(key) {
+    if (!key) return;
+    snapshotQueue = snapshotQueue.then(async () => {
+        const snapshot = await loadFolderSnapshot();
+        if (!snapshot || snapshot.keys.includes(key)) return;
+        snapshot.keys.push(key);
+        await chrome.storage.local.set({ folderSnapshot: snapshot });
+    }).catch(e => console.warn('[BG] Snapshot update failed:', e));
+}
+
+// Serialized so two downloads failing together can't overwrite each other's entry.
+let failedQueue = Promise.resolve();
+function recordFailedDownload(entry) {
+    failedQueue = failedQueue.then(async () => {
+        const data = await chrome.storage.local.get('failedDownloads');
+        const failedDownloads = Array.isArray(data.failedDownloads) ? data.failedDownloads : [];
+        failedDownloads.push({
+            url: entry.url,
+            path: entry.savePath,
+            courseName: entry.courseName || '',
+            sectionName: entry.sectionName || '',
+            unitTitle: entry.unitTitle || ''
+        });
+        await chrome.storage.local.set({ failedDownloads });
+    }).catch(e => console.warn('[BG] Recording failed download failed:', e));
+    return failedQueue;
+}
+
+function retryDownload(entry, runState) {
+    setTimeout(async () => {
+        // Stopped or replaced by a new run while waiting: drop the retry
+        if (isCancelled(runState)) return;
+        state.pendingRetryCount--;
+        state.queuedUrls.push(entry.url);
+        try {
+            const newDownloadId = await chrome.downloads.download({
+                url: entry.url,
+                filename: entry.savePath,
+                conflictAction: entry.conflictAction || 'uniquify',
+                saveAs: false
+            });
+            if (isCancelled(runState)) {
+                chrome.downloads.cancel(newDownloadId, () => { chrome.runtime.lastError; });
+                return;
+            }
+            state.activeDownloads[newDownloadId] = { ...entry, retryCount: entry.retryCount + 1 };
             saveState();
-            broadcastProgress('error');
-        } else if (downloadId) {
-            state.activeDownloads[downloadId] = { url, savePath, retryCount: 0 };
+        } catch (e) {
+            if (isCancelled(runState)) return;
+            state.stats.errors++;
+            state.queuedUrls = state.queuedUrls.filter(u => u !== entry.url);
+            recordFailedDownload(entry);
             saveState();
             broadcastProgress('downloading');
+            checkAllComplete();
         }
-    });
+    }, 3000);
 }
 
 chrome.downloads.onChanged.addListener(async (delta) => {
@@ -416,6 +531,7 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     if (!delta.state) return;
 
     if (delta.state.current === 'complete') {
+        recordSavedTranscript(entry.key);
         state.completedUrls.push(entry.url);
         state.stats.completed++;
         delete state.activeDownloads[delta.id];
@@ -426,57 +542,31 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     }
 
     if (delta.state.current === 'interrupted') {
-        if (entry.retryCount < 1) {
-            state.queuedUrls = state.queuedUrls.filter(u => u !== entry.url);
-            delete state.activeDownloads[delta.id];
+        delete state.activeDownloads[delta.id];
+        state.queuedUrls = state.queuedUrls.filter(u => u !== entry.url);
+
+        // Cancelled from Chrome's download bar: respect it instead of retrying
+        const userCancelled = delta.error?.current === 'USER_CANCELED';
+        if (entry.retryCount < 1 && !userCancelled) {
             state.pendingRetryCount++;
             await saveState();
             console.log(`Retrying download: ${entry.url}`);
-
-            setTimeout(() => {
-                state.queuedUrls.push(entry.url);
-                chrome.downloads.download({
-                    url: entry.url,
-                    filename: entry.savePath,
-                    conflictAction: 'uniquify',
-                    saveAs: false
-                }, (newDownloadId) => {
-                    if (newDownloadId) {
-                        state.activeDownloads[newDownloadId] = { ...entry, retryCount: entry.retryCount + 1 };
-                    } else {
-                        state.stats.errors++;
-                    }
-                    state.pendingRetryCount--;
-                    saveState();
-                    if (!newDownloadId) checkAllComplete();
-                });
-            }, 3000);
+            retryDownload(entry, state);
             return;
         }
 
         state.stats.errors++;
-        delete state.activeDownloads[delta.id];
-        chrome.storage.local.get('failedDownloads').then(data => {
-            const failedDownloads = data.failedDownloads || [];
-            failedDownloads.push({
-                url: entry.url,
-                path: entry.savePath,
-                courseName: entry.courseName || '',
-                sectionName: entry.sectionName || '',
-                unitTitle: entry.unitTitle || ''
-            });
-            chrome.storage.local.set({ failedDownloads });
-        });
+        recordFailedDownload(entry);
         await saveState();
-        broadcastProgress('error');
+        broadcastProgress('downloading');
         checkAllComplete();
     }
 });
 
 // ---- Run Orchestration ----
 
-async function processUnit(course, unit) {
-    if (state.stopRequested) return;
+async function processUnit(course, unit, runState) {
+    if (isCancelled(runState)) return;
 
     const sectionName = unit.chapterTitle || unit.sequentialTitle || course.name;
     state.cursor = {
@@ -498,7 +588,7 @@ async function processUnit(course, unit) {
         const html = await response.text();
         const transcripts = collectTranscriptsFromHtml(html, xblockUrl);
         for (const t of transcripts) {
-            if (state.stopRequested) return;
+            if (isCancelled(runState)) return;
             await handleDownloadPDF({
                 url: t.url,
                 courseName: course.name,
@@ -512,8 +602,8 @@ async function processUnit(course, unit) {
     }
 }
 
-async function processOneCourse(course) {
-    if (state.stopRequested) return;
+async function processOneCourse(course, runState) {
+    if (isCancelled(runState)) return;
 
     state.isCrawling = true;
     state.isRunning = true;
@@ -522,12 +612,11 @@ async function processOneCourse(course) {
     broadcastProgress('downloading');
 
     const units = await getCourseOutline(course.courseId);
-    if (state.stopRequested) return;
+    if (isCancelled(runState)) return;
 
     if (!units || units.length === 0) {
         state.lastError = `Could not load outline for "${course.name}". Refresh your IIMBx login and retry.`;
         await saveState();
-        broadcastProgress('error');
         throw new Error('outline_failed');
     }
 
@@ -536,9 +625,9 @@ async function processOneCourse(course) {
     let cursor = 0;
     const worker = async () => {
         while (cursor < units.length) {
-            if (state.stopRequested) return;
+            if (isCancelled(runState)) return;
             const idx = cursor++;
-            await processUnit(course, units[idx]);
+            await processUnit(course, units[idx], runState);
         }
     };
 
@@ -550,6 +639,7 @@ async function processOneCourse(course) {
 }
 
 async function runDownload(courses, startIdx = 0) {
+    const runState = state;
     state.queueInProgress = true;
     state.pendingCourses = courses;
     state.currentCourseIndex = startIdx;
@@ -559,43 +649,49 @@ async function runDownload(courses, startIdx = 0) {
 
     try {
         for (let i = startIdx; i < courses.length; i++) {
-            if (state.stopRequested) break;
+            if (isCancelled(runState)) break;
             state.currentCourseIndex = i;
             await saveState();
             try {
-                await processOneCourse(courses[i]);
+                await processOneCourse(courses[i], runState);
             } catch (e) {
                 console.warn(`[BG] Course ${courses[i].name} aborted:`, e.message);
                 if (e.message === 'outline_failed') break;
             }
         }
     } finally {
-        state.queueInProgress = false;
-        state.isCrawling = false;
-        state.pendingCourses = [];
-        await saveState();
+        // A reset or a newer run replaced this run's state; leave the new one alone.
+        if (runState === state) {
+            state.queueInProgress = false;
+            state.isCrawling = false;
+            state.pendingCourses = [];
+            if (state.lastError && !state.stopRequested) state.isRunning = false;
+            await saveState();
 
-        if (state.stopRequested) {
-            broadcastProgress('stopped');
-        } else if (state.lastError) {
-            broadcastProgress('error');
-        } else if (Object.keys(state.activeDownloads).length > 0 || (state.pendingRetryCount || 0) > 0) {
-            broadcastProgress('crawl_complete');
-        } else {
-            checkAllComplete();
+            if (state.stopRequested) {
+                broadcastProgress('stopped');
+            } else if (state.lastError) {
+                broadcastProgress('error');
+            } else if (Object.keys(state.activeDownloads).length > 0 || (state.pendingRetryCount || 0) > 0) {
+                broadcastProgress('crawl_complete');
+            } else {
+                checkAllComplete();
+            }
         }
     }
 }
 
 function startRun(courses, startIdx = 0) {
-    if (activeRunPromise) {
+    if (activeRun && activeRun.state === state) {
         console.log('[BG] Run already in progress; ignoring duplicate start');
-        return activeRunPromise;
+        return activeRun.promise;
     }
-    activeRunPromise = runDownload(courses, startIdx).finally(() => {
-        activeRunPromise = null;
+    const run = { state };
+    run.promise = runDownload(courses, startIdx).finally(() => {
+        if (activeRun === run) activeRun = null;
     });
-    return activeRunPromise;
+    activeRun = run;
+    return run.promise;
 }
 
 // ---- Failed-download retry ----
@@ -618,14 +714,18 @@ async function retryFailedDownloads() {
     await chrome.storage.local.remove('failedDownloads');
 
     for (const entry of failed) {
+        // Entries recorded before names were stored only carry the path:
+        // Transcripts/<course>/<section>/<file>.pdf
+        const parts = (entry.path || '').split(/[\\/]/);
         await handleDownloadPDF({
             url: entry.url,
-            courseName: entry.courseName || '',
-            sectionName: entry.sectionName || '',
+            courseName: entry.courseName || parts[1] || '',
+            sectionName: entry.sectionName || parts[2] || '',
             unitTitle: entry.unitTitle || '',
-            filename: (entry.path || '').split(/[\\/]/).pop() || ''
+            filename: parts[parts.length - 1] || ''
         });
     }
+    checkAllComplete();
     return failed.length;
 }
 
@@ -652,9 +752,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ status: 'error', reason: 'no_courses' });
                 return;
             }
+            const existingFiles = Array.isArray(message.existingKeys) ? message.existingKeys : [];
+            abandonCurrentRun();
             state = createDefaultState();
+            state.folderChecked = !!message.folderChecked;
+            existingKeys = new Set(existingFiles);
             cachedUsername = null;
             await chrome.storage.local.remove('failedDownloads');
+            await chrome.storage.local.set({ existingFiles });
             await saveState();
             startRun(courses, 0);
             sendResponse({ status: 'started' });
@@ -690,9 +795,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         if (message.type === 'RESET_STATE') {
+            abandonCurrentRun();
             state = createDefaultState();
+            existingKeys = new Set();
             cachedUsername = null;
-            await chrome.storage.local.remove('failedDownloads');
+            await chrome.storage.local.remove(['failedDownloads', 'existingFiles']);
             await saveState();
             sendResponse({ status: 'reset' });
             return;
